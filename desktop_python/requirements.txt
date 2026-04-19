@@ -1,0 +1,15 @@
+# DrawTab Desktop - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core (required)
+websockets>=12.0
+
+# Screen mirroring (optional, for --mirror flag)
+mss>=9.0.1
+Pillow>=10.0.0
+
+# Linux uinput tablet support (optional, Linux only)
+# python-uinput>=0.11.2
+
+# macOS Quartz support (optional, macOS only)
+# pyobjc-framework-Quartz>=10.0
