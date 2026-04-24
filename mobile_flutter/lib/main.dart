@@ -233,6 +233,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
   double _pressureMultiplier = 1.0;
   double _tiltSensitivity = 1.0;
   bool _eraserMode = false;
+  bool _useRelativeCoordinates = true;
   String _status = 'Connected';
   int _flushIntervalMs = 16;
 
@@ -362,8 +363,14 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
   DrawEvent _pointerToEvent(PointerEvent e, String type) {
     final size = _canvasSize ?? MediaQuery.of(context).size;
-    final normX = (e.localPosition.dx / size.width).clamp(0.0, 1.0);
-    final normY = (e.localPosition.dy / size.height).clamp(0.0, 1.0);
+    final safeWidth = size.width <= 0 ? 1.0 : size.width;
+    final safeHeight = size.height <= 0 ? 1.0 : size.height;
+    final mappedX = _useRelativeCoordinates
+      ? (e.localPosition.dx / safeWidth).clamp(0.0, 1.0)
+      : e.localPosition.dx;
+    final mappedY = _useRelativeCoordinates
+      ? (e.localPosition.dy / safeHeight).clamp(0.0, 1.0)
+      : e.localPosition.dy;
 
     double pressure = e.pressure.clamp(0.0, 1.0);
     if (pressure == 0.0 && type != 'up') pressure = 1.0;
@@ -378,8 +385,8 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
     return DrawEvent(
       type: type,
-      x: normX,
-      y: normY,
+      x: mappedX,
+      y: mappedY,
       pressure: pressure,
       tiltX: tiltX,
       tiltY: tiltY,
@@ -465,6 +472,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
   Widget _buildToolbar() {
     final flushLabel = '${(1000 / _flushIntervalMs).round()}Hz';
+    final mappingModeLabel = _useRelativeCoordinates ? 'Relative' : 'Absolute';
 
     return Container(
       height: 48,
@@ -488,6 +496,18 @@ class _DrawingScreenState extends State<DrawingScreen> {
               onTap: () => setState(() => _eraserMode = !_eraserMode),
             ),
             const SizedBox(width: 4),
+            _ToolBtn(
+              icon: _useRelativeCoordinates ? Icons.percent : Icons.straighten,
+              active: !_useRelativeCoordinates,
+              tooltip: 'Mapping: $mappingModeLabel',
+              onTap: () => setState(() => _useRelativeCoordinates = !_useRelativeCoordinates),
+            ),
+            const SizedBox(width: 4),
+            Text(
+              mappingModeLabel,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            const SizedBox(width: 8),
             _SliderTool(
               icon: Icons.compress,
               value: _pressureMultiplier,

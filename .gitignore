@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Flutter / Dart
 **/build/
 **/.dart_tool/
@@ -28,6 +27,10 @@
 .coverage.*
 htmlcov/
 
+# Desktop packaging outputs
+desktop_python/build/
+desktop_python/dist/
+
 # Environment / secrets
 .env
 .env.*
@@ -35,4 +38,4 @@ htmlcov/
 
 # OS / misc
 .DS_Store
-*.log>>>>>>> a431bc8 (Initial stable release)
+*.log
