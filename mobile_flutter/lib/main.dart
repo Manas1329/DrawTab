@@ -174,6 +174,9 @@ class DrawEvent {
   final String type;   // 'down' | 'move' | 'up' | 'hover'
   final double x;
   final double y;
+  final bool normalized;
+  final double sourceWidth;
+  final double sourceHeight;
   final double pressure;
   final double tiltX;
   final double tiltY;
@@ -186,6 +189,9 @@ class DrawEvent {
     required this.type,
     required this.x,
     required this.y,
+    required this.normalized,
+    required this.sourceWidth,
+    required this.sourceHeight,
     this.pressure = 1.0,
     this.tiltX = 0.0,
     this.tiltY = 0.0,
@@ -199,6 +205,9 @@ class DrawEvent {
     'type': type,
     'x': double.parse(x.toStringAsFixed(4)),
     'y': double.parse(y.toStringAsFixed(4)),
+    'normalized': normalized,
+    'sourceWidth': double.parse(sourceWidth.toStringAsFixed(2)),
+    'sourceHeight': double.parse(sourceHeight.toStringAsFixed(2)),
     'pressure': double.parse(pressure.toStringAsFixed(4)),
     'tiltX': double.parse(tiltX.toStringAsFixed(2)),
     'tiltY': double.parse(tiltY.toStringAsFixed(2)),
@@ -233,7 +242,9 @@ class _DrawingScreenState extends State<DrawingScreen> {
   double _pressureMultiplier = 1.0;
   double _tiltSensitivity = 1.0;
   bool _eraserMode = false;
-  bool _useRelativeCoordinates = true;
+  bool _regionModeEnabled = false;
+  bool _regionSelectionPending = false;
+  Map<String, dynamic>? _selectedRegion;
   String _status = 'Connected';
   int _flushIntervalMs = 16;
 
@@ -242,16 +253,98 @@ class _DrawingScreenState extends State<DrawingScreen> {
     super.initState();
     _serverUri = widget.serverUri;
     _attachChannel(widget.channel);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _sendCommand({'cmd': 'get_state'});
+    });
   }
 
   void _attachChannel(WebSocketChannel channel) {
     _channel = channel;
     _channelSubscription?.cancel();
     _channelSubscription = _channel.stream.listen(
-      (_) {},
+      _handleServerMessage,
       onError: (_) => _handleDisconnect(),
       onDone: () => _handleDisconnect(),
     );
+  }
+
+  void _sendCommand(Map<String, dynamic> command) {
+    if (!_connected) {
+      return;
+    }
+
+    try {
+      _channel.sink.add(jsonEncode(command));
+    } catch (_) {
+      setState(() {
+        _connected = false;
+        _status = 'Disconnected';
+      });
+    }
+  }
+
+  void _handleServerMessage(dynamic message) {
+    if (message is! String) {
+      return;
+    }
+
+    try {
+      final decoded = jsonDecode(message);
+      if (decoded is! Map<String, dynamic>) {
+        return;
+      }
+
+      if (decoded['cmd'] == 'region_state') {
+        final region = decoded['region'];
+        setState(() {
+          _regionModeEnabled = decoded['regionModeEnabled'] == true;
+          _selectedRegion = region is Map ? Map<String, dynamic>.from(region) : null;
+          _regionSelectionPending = false;
+          _status = _regionModeEnabled
+              ? (_selectedRegion == null ? 'Region mode on' : 'Region selected')
+              : 'Connected';
+        });
+      }
+    } catch (_) {
+      // Ignore non-JSON server messages.
+    }
+  }
+
+  String _regionSummary() {
+    final region = _selectedRegion;
+    if (region == null) {
+      return 'Full screen';
+    }
+
+    final left = region['left'] ?? 0;
+    final top = region['top'] ?? 0;
+    final width = region['width'] ?? 0;
+    final height = region['height'] ?? 0;
+    return 'Region ${width}x${height} @ ${left},${top}';
+  }
+
+  void _setRegionMode(bool enabled) {
+    setState(() {
+      _regionModeEnabled = enabled;
+      _status = enabled ? 'Region mode on' : 'Connected';
+    });
+    _sendCommand({'cmd': 'region_mode', 'enabled': enabled});
+
+    if (enabled && _selectedRegion == null) {
+      _requestRegionSelection();
+    }
+  }
+
+  void _requestRegionSelection() {
+    if (!_connected || _regionSelectionPending) {
+      return;
+    }
+
+    setState(() {
+      _regionSelectionPending = true;
+      _status = 'Selecting region...';
+    });
+    _sendCommand({'cmd': 'select_region'});
   }
 
   void _handleDisconnect() {
@@ -264,6 +357,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
     _eventBuffer.clear();
     setState(() {
       _connected = false;
+      _regionSelectionPending = false;
       _status = 'Disconnected';
     });
   }
@@ -298,7 +392,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
       _channel = nextChannel;
       _channelSubscription = _channel.stream.listen(
-        (_) {},
+        _handleServerMessage,
         onError: (_) => _handleDisconnect(),
         onDone: () => _handleDisconnect(),
       );
@@ -311,6 +405,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
         _reconnecting = false;
         _status = 'Connected';
       });
+      _sendCommand({'cmd': 'get_state'});
     } catch (e) {
       await nextChannel.sink.close();
       if (!mounted) {
@@ -365,12 +460,8 @@ class _DrawingScreenState extends State<DrawingScreen> {
     final size = _canvasSize ?? MediaQuery.of(context).size;
     final safeWidth = size.width <= 0 ? 1.0 : size.width;
     final safeHeight = size.height <= 0 ? 1.0 : size.height;
-    final mappedX = _useRelativeCoordinates
-      ? (e.localPosition.dx / safeWidth).clamp(0.0, 1.0)
-      : e.localPosition.dx;
-    final mappedY = _useRelativeCoordinates
-      ? (e.localPosition.dy / safeHeight).clamp(0.0, 1.0)
-      : e.localPosition.dy;
+    final mappedX = (e.localPosition.dx / safeWidth).clamp(0.0, 1.0);
+    final mappedY = (e.localPosition.dy / safeHeight).clamp(0.0, 1.0);
 
     double pressure = e.pressure.clamp(0.0, 1.0);
     if (pressure == 0.0 && type != 'up') pressure = 1.0;
@@ -387,6 +478,9 @@ class _DrawingScreenState extends State<DrawingScreen> {
       type: type,
       x: mappedX,
       y: mappedY,
+      normalized: true,
+      sourceWidth: safeWidth,
+      sourceHeight: safeHeight,
       pressure: pressure,
       tiltX: tiltX,
       tiltY: tiltY,
@@ -472,7 +566,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
   Widget _buildToolbar() {
     final flushLabel = '${(1000 / _flushIntervalMs).round()}Hz';
-    final mappingModeLabel = _useRelativeCoordinates ? 'Relative' : 'Absolute';
+    final mappingModeLabel = _regionModeEnabled ? _regionSummary() : 'Full screen';
 
     return Container(
       height: 48,
@@ -497,10 +591,17 @@ class _DrawingScreenState extends State<DrawingScreen> {
             ),
             const SizedBox(width: 4),
             _ToolBtn(
-              icon: _useRelativeCoordinates ? Icons.percent : Icons.straighten,
-              active: !_useRelativeCoordinates,
-              tooltip: 'Mapping: $mappingModeLabel',
-              onTap: () => setState(() => _useRelativeCoordinates = !_useRelativeCoordinates),
+              icon: _regionModeEnabled ? Icons.crop_square : Icons.open_with,
+              active: _regionModeEnabled,
+              tooltip: 'Region mode: $mappingModeLabel',
+              onTap: () => _setRegionMode(!_regionModeEnabled),
+            ),
+            const SizedBox(width: 4),
+            _ToolBtn(
+              icon: Icons.select_all,
+              active: _regionSelectionPending,
+              tooltip: 'Select desktop region',
+              onTap: _requestRegionSelection,
             ),
             const SizedBox(width: 4),
             Text(

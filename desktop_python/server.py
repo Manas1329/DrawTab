@@ -18,6 +18,7 @@ import argparse
 import logging
 import platform
 import time
+import threading
 from dataclasses import dataclass
 from typing import Optional
 
@@ -37,6 +38,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger("DrawTab")
+BUILD_TAG = "mapping-fix-2026-04-25-3"
 
 # ─── INPUT EVENT DATACLASS ────────────────────────────────────────────────────
 
@@ -45,6 +47,9 @@ class DrawEvent:
     type: str        # 'down' | 'move' | 'up' | 'hover'
     x: float         # normalized 0.0–1.0
     y: float         # normalized 0.0–1.0
+    normalized: bool # True when x/y are normalized, False when absolute pixels
+    sourceWidth: float  # source input surface width in pixels
+    sourceHeight: float # source input surface height in pixels
     pressure: float  # 0.0–1.0
     tiltX: float     # -90 to 90 degrees
     tiltY: float     # -90 to 90 degrees
@@ -52,12 +57,52 @@ class DrawEvent:
     buttons: int     # 1=primary, 32=eraser
     ts: int          # microsecond timestamp
 
-    def to_screen(self, width: int, height: int) -> tuple[int, int]:
-        """Convert normalized coords to screen pixels."""
+    def to_screen(self, width: int, height: int, region: Optional[dict] = None) -> tuple[int, int]:
+        """Convert event coords to screen pixels."""
+        target_left = 0
+        target_top = 0
+        target_width = width
+        target_height = height
+
+        if region:
+            target_left = int(region.get('left', 0))
+            target_top = int(region.get('top', 0))
+            target_width = max(1, int(region.get('width', width)))
+            target_height = max(1, int(region.get('height', height)))
+
+        if self.normalized:
+            sx = int(target_left + (self.x * target_width))
+            sy = int(target_top + (self.y * target_height))
+        else:
+            if self.sourceWidth > 0 and self.sourceHeight > 0:
+                sx = int(target_left + ((self.x / self.sourceWidth) * target_width))
+                sy = int(target_top + ((self.y / self.sourceHeight) * target_height))
+            else:
+                sx = int(target_left + self.x)
+                sy = int(target_top + self.y)
+
+        max_x = target_left + max(1, target_width) - 1
+        max_y = target_top + max(1, target_height) - 1
         return (
-            max(0, min(width - 1, int(self.x * width))),
-            max(0, min(height - 1, int(self.y * height)))
+            max(target_left, min(max_x, sx)),
+            max(target_top, min(max_y, sy))
         )
+
+
+@dataclass
+class ScreenRegion:
+    left: int
+    top: int
+    width: int
+    height: int
+
+    def to_dict(self) -> dict:
+        return {
+            'left': int(self.left),
+            'top': int(self.top),
+            'width': int(self.width),
+            'height': int(self.height),
+        }
 
 # ─── PLATFORM INPUT INJECTORS ─────────────────────────────────────────────────
 
@@ -68,7 +113,7 @@ class InputInjector:
         self.height = height
         self._pen_down = False
 
-    def inject(self, evt: DrawEvent):
+    def inject(self, evt: DrawEvent, region: Optional[dict] = None):
         raise NotImplementedError
 
     def close(self):
@@ -85,6 +130,18 @@ class WindowsInputInjector(InputInjector):
         self.wt = wt
         self.user32 = ctypes.windll.user32
         self._setup_structs()
+        self._setup_screen_size()
+
+    def _setup_screen_size(self):
+        # Prefer actual current primary screen metrics for pixel mapping.
+        self.SM_CXSCREEN = 0
+        self.SM_CYSCREEN = 1
+        w = self.user32.GetSystemMetrics(self.SM_CXSCREEN)
+        h = self.user32.GetSystemMetrics(self.SM_CYSCREEN)
+        if w > 0:
+            self.width = w
+        if h > 0:
+            self.height = h
 
     def _setup_structs(self):
         c = self.ctypes
@@ -115,23 +172,15 @@ class WindowsInputInjector(InputInjector):
         self.MOUSEEVENTF_ABSOLUTE = 0x8000
         self.INPUT_MOUSE = 0
 
-    def inject(self, evt: DrawEvent):
-        sx, sy = evt.to_screen(65535, 65535)  # SendInput uses 0–65535 scale
-        flags = self.MOUSEEVENTF_MOVE | self.MOUSEEVENTF_ABSOLUTE
-        extra = 0
-
+    def inject(self, evt: DrawEvent, region: Optional[dict] = None):
+        px, py = evt.to_screen(self.width, self.height, region)
+        self.user32.SetCursorPos(px, py)
         if evt.type == 'down':
             self._pen_down = True
-            flags |= self.MOUSEEVENTF_LEFTDOWN
+            self.user32.mouse_event(self.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
         elif evt.type == 'up':
             self._pen_down = False
-            flags |= self.MOUSEEVENTF_LEFTUP
-
-        inp = self.INPUT(
-            type=self.INPUT_MOUSE,
-            mi=self.MOUSEINPUT(dx=sx, dy=sy, dwFlags=flags)
-        )
-        self.user32.SendInput(1, self.ctypes.byref(inp), self.ctypes.sizeof(inp))
+            self.user32.mouse_event(self.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 class MacOSInputInjector(InputInjector):
@@ -151,9 +200,9 @@ class MacOSInputInjector(InputInjector):
             Q.CGEventSetDoubleValueField(event, Q.kCGMouseEventPressure, pressure)
         Q.CGEventPost(Q.kCGHIDEventTap, event)
 
-    def inject(self, evt: DrawEvent):
+    def inject(self, evt: DrawEvent, region: Optional[dict] = None):
         Q = self.Quartz
-        sx, sy = evt.to_screen(self.width, self.height)
+        sx, sy = evt.to_screen(self.width, self.height, region)
 
         if evt.type == 'down':
             self._pen_down = True
@@ -204,8 +253,8 @@ class LinuxInputInjector(InputInjector):
             import subprocess
             self._subprocess = subprocess
 
-    def inject(self, evt: DrawEvent):
-        sx, sy = evt.to_screen(self.width, self.height)
+    def inject(self, evt: DrawEvent, region: Optional[dict] = None):
+        sx, sy = evt.to_screen(self.width, self.height, region)
         if self.use_uinput:
             self._inject_uinput(evt, sx, sy)
         else:
@@ -281,19 +330,27 @@ class DrawTabServer:
         self.enable_mirror = enable_mirror
         self.injector: Optional[InputInjector] = None
         self.clients: set = set()
+        self.region_mode_enabled = False
+        self.selected_region: Optional[dict] = None
+        self._region_selection_lock = asyncio.Lock()
 
         # Latency stats
         self._evt_count = 0
         self._last_report = time.time()
         self._max_lag_ms = 0.0
+        self._debug_logged_events = 0
 
     def _process_batch(self, batch: list):
         now_us = time.monotonic_ns() // 1000
+        active_region = self.selected_region if self.region_mode_enabled else None
         for raw in batch:
             evt = DrawEvent(
                 type=raw['type'],
                 x=raw['x'],
                 y=raw['y'],
+                normalized=raw.get('normalized', raw.get('relative', True)),
+                sourceWidth=raw.get('sourceWidth', 0.0),
+                sourceHeight=raw.get('sourceHeight', 0.0),
                 pressure=raw.get('pressure', 1.0),
                 tiltX=raw.get('tiltX', 0.0),
                 tiltY=raw.get('tiltY', 0.0),
@@ -302,12 +359,27 @@ class DrawTabServer:
                 ts=raw.get('ts', 0),
             )
 
+            if self._debug_logged_events < 8:
+                sx, sy = evt.to_screen(self.width, self.height, active_region)
+                log.info(
+                    "DBG evt=%s raw=(%.4f, %.4f) normalized=%s src=(%.2f, %.2f) mapped=(%d, %d)",
+                    evt.type,
+                    evt.x,
+                    evt.y,
+                    evt.normalized,
+                    evt.sourceWidth,
+                    evt.sourceHeight,
+                    sx,
+                    sy,
+                )
+                self._debug_logged_events += 1
+
             # Calculate lag
             if evt.ts > 0:
                 lag_ms = (now_us - evt.ts) / 1000.0
                 self._max_lag_ms = max(self._max_lag_ms, lag_ms)
 
-            self.injector.inject(evt)
+            self.injector.inject(evt, active_region)
             self._evt_count += 1
 
         # Stats every 5 seconds
@@ -323,6 +395,7 @@ class DrawTabServer:
         addr = ws.remote_address
         log.info(f"Client connected: {addr}")
         self.clients.add(ws)
+        await self._send_region_state(ws)
 
         try:
             async for message in ws:
@@ -335,6 +408,14 @@ class DrawTabServer:
                         self._process_batch([data])
                     elif data.get('cmd') == 'ping':
                         await ws.send(json.dumps({'cmd': 'pong', 'ts': data.get('ts')}))
+                    elif data.get('cmd') == 'get_state':
+                        await self._send_region_state(ws)
+                    elif data.get('cmd') == 'region_mode':
+                        self.region_mode_enabled = bool(data.get('enabled', False))
+                        await self._broadcast_region_state()
+                    elif data.get('cmd') == 'select_region':
+                        await self._select_region_from_overlay()
+                        await self._broadcast_region_state()
                 except json.JSONDecodeError:
                     log.warning("Invalid JSON received")
                 except Exception as e:
@@ -345,8 +426,145 @@ class DrawTabServer:
             self.clients.discard(ws)
             log.info(f"Client disconnected: {addr}")
 
+    async def _send_region_state(self, ws: WebSocketServerProtocol):
+        await ws.send(json.dumps({
+            'cmd': 'region_state',
+            'regionModeEnabled': self.region_mode_enabled,
+            'region': self.selected_region,
+        }))
+
+    async def _broadcast_region_state(self):
+        if not self.clients:
+            return
+
+        payload = json.dumps({
+            'cmd': 'region_state',
+            'regionModeEnabled': self.region_mode_enabled,
+            'region': self.selected_region,
+        })
+        dead_clients = set()
+        for ws in list(self.clients):
+            try:
+                await ws.send(payload)
+            except Exception:
+                dead_clients.add(ws)
+
+        for ws in dead_clients:
+            self.clients.discard(ws)
+
+    async def _select_region_from_overlay(self):
+        async with self._region_selection_lock:
+            region = await asyncio.to_thread(self._select_region_blocking)
+            if region:
+                self.selected_region = region
+                log.info(
+                    "Region selected: left=%d top=%d width=%d height=%d",
+                    region['left'], region['top'], region['width'], region['height']
+                )
+            else:
+                log.info("Region selection cancelled")
+
+    def _select_region_blocking(self) -> Optional[dict]:
+        try:
+            import tkinter as tk
+        except ImportError:
+            log.error("tkinter is required for region selection")
+            return None
+
+        selected: dict[str, int] = {}
+        done = threading.Event()
+
+        def run_overlay():
+            root = tk.Tk()
+            root.title('DrawTab Region Selector')
+            root.attributes('-fullscreen', True)
+            root.attributes('-topmost', True)
+            try:
+                root.attributes('-alpha', 0.25)
+            except Exception:
+                pass
+            root.configure(bg='black')
+
+            canvas = tk.Canvas(root, bg='black', highlightthickness=0, cursor='crosshair')
+            canvas.pack(fill='both', expand=True)
+            screen_w = root.winfo_screenwidth()
+            screen_h = root.winfo_screenheight()
+            start_x = 0
+            start_y = 0
+            rect_id = None
+            canvas.create_text(
+                screen_w // 2,
+                screen_h // 2,
+                text='Drag to select a region. Press Esc to cancel.',
+                fill='white',
+                font=('Segoe UI', 18, 'bold')
+            )
+
+            def finish(region: Optional[dict] = None):
+                if region:
+                    selected.update(region)
+                try:
+                    root.destroy()
+                finally:
+                    done.set()
+
+            def on_press(event):
+                nonlocal start_x, start_y, rect_id
+                start_x = event.x_root
+                start_y = event.y_root
+                if rect_id is not None:
+                    canvas.delete(rect_id)
+                rect_id = canvas.create_rectangle(
+                    event.x, event.y, event.x, event.y,
+                    outline='#6C63FF', width=3
+                )
+
+            def on_drag(event):
+                if rect_id is None:
+                    return
+                canvas.coords(
+                    rect_id,
+                    start_x - root.winfo_rootx(),
+                    start_y - root.winfo_rooty(),
+                    event.x,
+                    event.y,
+                )
+
+            def on_release(event):
+                left = min(start_x, event.x_root)
+                top = min(start_y, event.y_root)
+                width = abs(event.x_root - start_x)
+                height = abs(event.y_root - start_y)
+                if width < 4 or height < 4:
+                    finish(None)
+                    return
+                finish({
+                    'left': int(left),
+                    'top': int(top),
+                    'width': int(width),
+                    'height': int(height),
+                })
+
+            def on_escape(_event=None):
+                finish(None)
+
+            root.bind('<Escape>', on_escape)
+            canvas.bind('<ButtonPress-1>', on_press)
+            canvas.bind('<B1-Motion>', on_drag)
+            canvas.bind('<ButtonRelease-1>', on_release)
+
+            try:
+                root.mainloop()
+            finally:
+                done.set()
+
+        threading.Thread(target=run_overlay, daemon=True).start()
+        done.wait()
+        return selected or None
+
     async def start(self):
         self.injector = create_injector(self.width, self.height)
+        log.info(f"Build: {BUILD_TAG}")
         log.info(f"DrawTab server starting on ws://{self.host}:{self.port}")
         log.info(f"Input injection ready ({platform.system()})")
 
