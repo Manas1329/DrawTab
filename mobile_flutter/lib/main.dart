@@ -330,7 +330,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
     });
     _sendCommand({'cmd': 'region_mode', 'enabled': enabled});
 
-    if (enabled && _selectedRegion == null) {
+    if (enabled) {
       _requestRegionSelection();
     }
   }

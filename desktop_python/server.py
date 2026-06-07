@@ -18,19 +18,28 @@ import argparse
 import logging
 import platform
 import time
+import os
+import subprocess
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
+import math
 
 # ─── Optional screen mirror imports ──────────────────────────────────────────
 try:
     import websockets
-    from websockets.server import WebSocketServerProtocol
     HAS_WEBSOCKETS = True
 except ImportError:
     HAS_WEBSOCKETS = False
     print("Install websockets: pip install websockets")
     sys.exit(1)
+
+try:
+    from pynput import keyboard as pynput_keyboard
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
+    pynput_keyboard = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -103,6 +112,229 @@ class ScreenRegion:
             'width': int(self.width),
             'height': int(self.height),
         }
+
+
+# Region selector presets.
+# Change these values if you want different default sizes.
+PORTRAIT_PRESET_SIZE = (360, 640)
+LANDSCAPE_PRESET_SIZE = (640, 360)
+PORTRAIT_MIN_SIZE = (320, 480)
+LANDSCAPE_MIN_SIZE = (480, 320)
+
+# Interpolation: maximum pixels per injected step. Lower = smoother curves.
+INTERPOLATION_MAX_PIXEL_STEP = 4
+# Minimum time (ms) between events to trigger interpolation; if events are frequent
+# we skip adding intermediates to avoid overload/lag.
+INTERPOLATION_MIN_TIME_MS = 4
+
+
+def run_region_selector_app() -> Optional[dict]:
+    try:
+        import tkinter as tk
+    except ImportError:
+        log.error("tkinter is required for region selection")
+        return None
+
+    selected: dict[str, int] = {}
+    done = False
+
+    root = tk.Tk()
+    root.title('DrawTab Region Selector')
+    root.attributes('-topmost', True)
+    try:
+        root.attributes('-alpha', 1.0)
+    except Exception:
+        pass
+    root.deiconify()
+    root.update_idletasks()
+    root.lift()
+    root.focus_force()
+
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    max_width = screen_w
+    max_height = screen_h
+
+    def orientation_profile(mode: str) -> tuple[tuple[int, int], tuple[int, int]]:
+        if mode == 'landscape':
+            return LANDSCAPE_PRESET_SIZE, LANDSCAPE_MIN_SIZE
+        return PORTRAIT_PRESET_SIZE, PORTRAIT_MIN_SIZE
+
+    base_size, min_size = orientation_profile('portrait')
+    scale = min(screen_w / base_size[0], screen_h / base_size[1], 1.0)
+    width = max(min_size[0], int(base_size[0] * scale))
+    height = max(min_size[1], int(base_size[1] * scale))
+    width = min(width, max_width)
+    height = min(height, max_height)
+
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 2)
+    root.geometry(f'{width}x{height}+{x}+{y}')
+    root.minsize(min_size[0], min_size[1])
+    root.maxsize(max_width, max_height)
+    root.resizable(True, True)
+    orientation = 'portrait' if height >= width else 'landscape'
+    orientation_var = tk.StringVar(value=orientation)
+
+    frame = tk.Frame(root, bg='#111827', highlightbackground='#6C63FF', highlightthickness=3)
+    frame.pack(fill='both', expand=True)
+
+    header = tk.Frame(frame, bg='#6C63FF', height=40)
+    header.pack(fill='x', side='top')
+    header.pack_propagate(False)
+
+    title = tk.Label(
+        header,
+        text='DrawTab Region Selector',
+        fg='white',
+        bg='#6C63FF',
+        font=('Segoe UI', 11, 'bold')
+    )
+    title.pack(side='left', padx=12)
+
+    hint = tk.Label(
+        frame,
+        text='Move and resize this window with the mouse. Use Portrait/Landscape to switch size. Press Enter to confirm or Esc to cancel.',
+        fg='white',
+        bg='#111827',
+        justify='left',
+        anchor='w',
+        wraplength=max(220, width - 24),
+        font=('Segoe UI', 11)
+    )
+    hint.pack(fill='x', padx=12, pady=(10, 6))
+
+    control_bar = tk.Frame(frame, bg='#111827')
+    control_bar.pack(fill='x', padx=12, pady=(0, 8))
+
+    orientation_label = tk.Label(
+        control_bar,
+        text='Orientation:',
+        fg='white',
+        bg='#111827',
+        font=('Segoe UI', 10, 'bold')
+    )
+    orientation_label.pack(side='left', padx=(0, 8))
+
+    body = tk.Frame(frame, bg='#111827')
+    body.pack(fill='both', expand=True, padx=12, pady=(116, 12))
+
+    info = tk.Label(
+        body,
+        text='Region will map only within this window area.\nDefault size is mobile-like and can be resized up to the monitor bounds.',
+        fg='white',
+        bg='#111827',
+        justify='left',
+        anchor='nw',
+        wraplength=max(220, width - 48),
+        font=('Segoe UI', 12)
+    )
+    info.pack(anchor='nw', fill='x')
+
+    def apply_orientation(next_orientation: str):
+        nonlocal orientation
+        orientation = next_orientation
+        orientation_var.set(next_orientation)
+        base_size, next_min_size = orientation_profile(next_orientation)
+        scale = min(screen_w / base_size[0], screen_h / base_size[1], 1.0)
+        next_width = max(next_min_size[0], int(base_size[0] * scale))
+        next_height = max(next_min_size[1], int(base_size[1] * scale))
+        next_width = min(next_width, max_width)
+        next_height = min(next_height, max_height)
+        next_x = max(0, (screen_w - next_width) // 2)
+        next_y = max(0, (screen_h - next_height) // 2)
+        root.geometry(f'{next_width}x{next_height}+{next_x}+{next_y}')
+        root.minsize(next_min_size[0], next_min_size[1])
+        root.maxsize(max_width, max_height)
+        hint.configure(wraplength=max(220, next_width - 24))
+        info.configure(wraplength=max(220, next_width - 48))
+        sync_orientation_buttons()
+
+    portrait_btn = tk.Button(
+        control_bar,
+        text='Portrait',
+        command=lambda: apply_orientation('portrait'),
+        relief='flat',
+        bg='#374151',
+        fg='white',
+        activebackground='#6C63FF',
+        activeforeground='white',
+        padx=10,
+        pady=4,
+    )
+    portrait_btn.pack(side='left', padx=(0, 8))
+
+    landscape_btn = tk.Button(
+        control_bar,
+        text='Landscape',
+        command=lambda: apply_orientation('landscape'),
+        relief='flat',
+        bg='#374151',
+        fg='white',
+        activebackground='#6C63FF',
+        activeforeground='white',
+        padx=10,
+        pady=4,
+    )
+    landscape_btn.pack(side='left')
+
+    def sync_orientation_buttons():
+        active_bg = '#6C63FF'
+        inactive_bg = '#374151'
+        portrait_btn.configure(bg=active_bg if orientation_var.get() == 'portrait' else inactive_bg)
+        landscape_btn.configure(bg=active_bg if orientation_var.get() == 'landscape' else inactive_bg)
+
+    def on_resize(_event=None):
+        current_width = root.winfo_width()
+        hint.configure(wraplength=max(220, current_width - 24))
+        info.configure(wraplength=max(220, current_width - 48))
+
+    root.bind('<Configure>', on_resize)
+    sync_orientation_buttons()
+
+    def finish(region: Optional[dict] = None):
+        nonlocal done
+        if done:
+            return
+        done = True
+        if region:
+            selected.update(region)
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+    def capture_region():
+        root.update_idletasks()
+        left = int(root.winfo_rootx())
+        top = int(root.winfo_rooty())
+        width = int(root.winfo_width())
+        height = int(root.winfo_height())
+        _, min_size = orientation_profile(orientation)
+        width = max(min_size[0], min(max_width, width))
+        height = max(min_size[1], min(max_height, height))
+        left = max(0, min(screen_w - width, left))
+        top = max(0, min(screen_h - height, top))
+        return {
+            'left': left,
+            'top': top,
+            'width': width,
+            'height': height,
+        }
+
+    def on_confirm(_event=None):
+        finish(capture_region())
+
+    def on_cancel(_event=None):
+        finish(None)
+
+    root.bind('<Return>', on_confirm)
+    root.bind('<KP_Enter>', on_confirm)
+    root.bind('<Escape>', on_cancel)
+    root.protocol('WM_DELETE_WINDOW', on_cancel)
+
+    root.mainloop()
+    return selected or None
 
 # ─── PLATFORM INPUT INJECTORS ─────────────────────────────────────────────────
 
@@ -333,12 +565,16 @@ class DrawTabServer:
         self.region_mode_enabled = False
         self.selected_region: Optional[dict] = None
         self._region_selection_lock = asyncio.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._hotkey_listener = None
 
         # Latency stats
         self._evt_count = 0
         self._last_report = time.time()
         self._max_lag_ms = 0.0
         self._debug_logged_events = 0
+        # Track last injected screen point for interpolation smoothing
+        self._last_injected: Optional[dict] = None
 
     def _process_batch(self, batch: list):
         now_us = time.monotonic_ns() // 1000
@@ -379,7 +615,11 @@ class DrawTabServer:
                 lag_ms = (now_us - evt.ts) / 1000.0
                 self._max_lag_ms = max(self._max_lag_ms, lag_ms)
 
-            self.injector.inject(evt, active_region)
+            # Inject with smoothing interpolation to produce curved strokes
+            try:
+                self._inject_with_interpolation(evt, active_region)
+            except Exception as exc:
+                log.exception(f"Injection error: {exc}")
             self._evt_count += 1
 
         # Stats every 5 seconds
@@ -391,7 +631,80 @@ class DrawTabServer:
             self._max_lag_ms = 0.0
             self._last_report = now
 
-    async def handle_client(self, ws: WebSocketServerProtocol):
+    def _inject_with_interpolation(self, evt: DrawEvent, region: Optional[dict]):
+        """Inject an event, inserting interpolated move events between the
+        previously injected point and this event to smooth strokes.
+        """
+        # Guard: injector must be ready
+        if not self.injector:
+            log.warning("Injector not ready, dropping event")
+            return
+
+        # Compute target screen coordinates for this event
+        sx, sy = evt.to_screen(self.width, self.height, region)
+
+        prev = self._last_injected
+
+        # Decide whether to interpolate: only when previous point exists and pen was down
+        if isinstance(prev, dict) and prev.get('pen_down', False) and evt.type in ('move', 'up'):
+            dx = sx - prev['x']
+            dy = sy - prev['y']
+            dist = math.hypot(dx, dy)
+            # Only interpolate when the incoming events are sparse enough
+            steps = 0
+            prev_ts = prev.get('ts') if isinstance(prev, dict) else None
+            if isinstance(prev_ts, (int, float)) and isinstance(evt.ts, (int, float)):
+                dt_ms = (evt.ts - prev_ts) / 1000.0
+                if dt_ms >= INTERPOLATION_MIN_TIME_MS:
+                    step_px = max(1, INTERPOLATION_MAX_PIXEL_STEP)
+                    steps = int(dist / step_px)
+            if steps > 0:
+                # Precompute region offsets
+                target_left = int(region.get('left', 0)) if region else 0
+                target_top = int(region.get('top', 0)) if region else 0
+                for i in range(1, steps + 1):
+                    t = i / (steps + 1)
+                    ix = int(prev['x'] + dx * t)
+                    iy = int(prev['y'] + dy * t)
+                    # Convert to coordinates relative to region (so injector.to_screen doesn't double-offset)
+                    local_x = ix - target_left
+                    local_y = iy - target_top
+                    # Interpolate pressure
+                    prev_pressure = float(prev.get('pressure', evt.pressure))
+                    ipress = prev_pressure + (evt.pressure - prev_pressure) * t
+                    synthetic = DrawEvent(
+                        type='move',
+                        x=float(local_x),
+                        y=float(local_y),
+                        normalized=False,
+                        sourceWidth=0.0,
+                        sourceHeight=0.0,
+                        pressure=float(ipress),
+                        tiltX=0.0,
+                        tiltY=0.0,
+                        isPen=evt.isPen,
+                        buttons=evt.buttons,
+                        ts=evt.ts,
+                    )
+                    # injector will map non-normalized coords as absolute pixels
+                    self.injector.inject(synthetic, region)
+
+        # Finally inject the real event
+        self.injector.inject(evt, region)
+
+        # Update last injected point state
+        pen_down = True if evt.type in ('down', 'move') else False
+        if evt.type == 'up':
+            pen_down = False
+        self._last_injected = {
+            'x': sx,
+            'y': sy,
+            'pressure': float(evt.pressure),
+            'pen_down': pen_down,
+            'ts': evt.ts,
+        }
+
+    async def handle_client(self, ws: Any):
         addr = ws.remote_address
         log.info(f"Client connected: {addr}")
         self.clients.add(ws)
@@ -426,7 +739,7 @@ class DrawTabServer:
             self.clients.discard(ws)
             log.info(f"Client disconnected: {addr}")
 
-    async def _send_region_state(self, ws: WebSocketServerProtocol):
+    async def _send_region_state(self, ws: Any):
         await ws.send(json.dumps({
             'cmd': 'region_state',
             'regionModeEnabled': self.region_mode_enabled,
@@ -465,105 +778,31 @@ class DrawTabServer:
                 log.info("Region selection cancelled")
 
     def _select_region_blocking(self) -> Optional[dict]:
+        cmd = [sys.executable, os.path.abspath(__file__), '--select-region']
         try:
-            import tkinter as tk
-        except ImportError:
-            log.error("tkinter is required for region selection")
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except Exception as exc:
+            log.error(f"Failed to launch region selector: {exc}")
             return None
 
-        selected: dict[str, int] = {}
-        done = threading.Event()
+        output = (completed.stdout or '').strip()
+        if not output:
+            return None
 
-        def run_overlay():
-            root = tk.Tk()
-            root.title('DrawTab Region Selector')
-            root.attributes('-fullscreen', True)
-            root.attributes('-topmost', True)
-            try:
-                root.attributes('-alpha', 0.25)
-            except Exception:
-                pass
-            root.configure(bg='black')
+        try:
+            data = json.loads(output)
+        except json.JSONDecodeError:
+            log.error(f"Region selector returned invalid output: {output}")
+            return None
 
-            canvas = tk.Canvas(root, bg='black', highlightthickness=0, cursor='crosshair')
-            canvas.pack(fill='both', expand=True)
-            screen_w = root.winfo_screenwidth()
-            screen_h = root.winfo_screenheight()
-            start_x = 0
-            start_y = 0
-            rect_id = None
-            canvas.create_text(
-                screen_w // 2,
-                screen_h // 2,
-                text='Drag to select a region. Press Esc to cancel.',
-                fill='white',
-                font=('Segoe UI', 18, 'bold')
-            )
-
-            def finish(region: Optional[dict] = None):
-                if region:
-                    selected.update(region)
-                try:
-                    root.destroy()
-                finally:
-                    done.set()
-
-            def on_press(event):
-                nonlocal start_x, start_y, rect_id
-                start_x = event.x_root
-                start_y = event.y_root
-                if rect_id is not None:
-                    canvas.delete(rect_id)
-                rect_id = canvas.create_rectangle(
-                    event.x, event.y, event.x, event.y,
-                    outline='#6C63FF', width=3
-                )
-
-            def on_drag(event):
-                if rect_id is None:
-                    return
-                canvas.coords(
-                    rect_id,
-                    start_x - root.winfo_rootx(),
-                    start_y - root.winfo_rooty(),
-                    event.x,
-                    event.y,
-                )
-
-            def on_release(event):
-                left = min(start_x, event.x_root)
-                top = min(start_y, event.y_root)
-                width = abs(event.x_root - start_x)
-                height = abs(event.y_root - start_y)
-                if width < 4 or height < 4:
-                    finish(None)
-                    return
-                finish({
-                    'left': int(left),
-                    'top': int(top),
-                    'width': int(width),
-                    'height': int(height),
-                })
-
-            def on_escape(_event=None):
-                finish(None)
-
-            root.bind('<Escape>', on_escape)
-            canvas.bind('<ButtonPress-1>', on_press)
-            canvas.bind('<B1-Motion>', on_drag)
-            canvas.bind('<ButtonRelease-1>', on_release)
-
-            try:
-                root.mainloop()
-            finally:
-                done.set()
-
-        threading.Thread(target=run_overlay, daemon=True).start()
-        done.wait()
-        return selected or None
+        if not isinstance(data, dict):
+            return None
+        return data
 
     async def start(self):
+        self._loop = asyncio.get_running_loop()
         self.injector = create_injector(self.width, self.height)
+        self._start_hotkey_listener()
         log.info(f"Build: {BUILD_TAG}")
         log.info(f"DrawTab server starting on ws://{self.host}:{self.port}")
         log.info(f"Input injection ready ({platform.system()})")
@@ -586,8 +825,41 @@ class DrawTabServer:
                                          ping_timeout=10):
                 await asyncio.Future()  # run forever
         finally:
+            self._stop_hotkey_listener()
             if self.injector:
                 self.injector.close()
+
+    def _start_hotkey_listener(self):
+        if not HAS_PYNPUT:
+            log.info("Hotkey listener unavailable (install pynput to enable Ctrl+Shift+R)")
+            return
+
+        if pynput_keyboard is None:
+            log.info("pynput module not available, hotkey disabled")
+            return
+
+        def open_selector():
+            if not self._loop:
+                return
+            asyncio.run_coroutine_threadsafe(self._select_region_from_overlay(), self._loop)
+
+        try:
+            self._hotkey_listener = pynput_keyboard.GlobalHotKeys({
+                '<ctrl>+<shift>+r': open_selector,
+            })
+            self._hotkey_listener.start()
+            log.info("Hotkey ready: Ctrl+Shift+R opens region selector")
+        except Exception as exc:
+            log.warning(f"Hotkey listener unavailable: {exc}")
+
+    def _stop_hotkey_listener(self):
+        listener = self._hotkey_listener
+        self._hotkey_listener = None
+        if listener is not None:
+            try:
+                listener.stop()
+            except Exception:
+                pass
 
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────────────────
@@ -599,7 +871,15 @@ def main():
     parser.add_argument('--width', type=int, default=0, help='Screen width (0=auto)')
     parser.add_argument('--height', type=int, default=0, help='Screen height (0=auto)')
     parser.add_argument('--mirror', action='store_true', help='Enable screen mirroring')
+    parser.add_argument('--select-region', action='store_true', help='Launch the region selector window and print the selected region as JSON')
     args = parser.parse_args()
+
+    if args.select_region:
+        region = run_region_selector_app()
+        if region:
+            print(json.dumps(region))
+            return
+        return
 
     # Auto-detect screen resolution
     if args.width == 0 or args.height == 0:
