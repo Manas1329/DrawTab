@@ -2,11 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'dart:ui';
 import 'package:flutter/gestures.dart';
-
+import 'package:shared_preferences/shared_preferences.dart';
+import 'input_panel_screen.dart';
 
 
 // void main() {
@@ -246,16 +249,58 @@ class _DrawingScreenState extends State<DrawingScreen> {
   bool _regionSelectionPending = false;
   Map<String, dynamic>? _selectedRegion;
   String _status = 'Connected';
-  int _flushIntervalMs = 16;
+  int _flushIntervalMs = 8;
+  int _currentIndex = 0;
+  String _eraserShortcut = 'e';
+  String _drawShortcut = 'b';
+  final StreamController<dynamic> _messageBus = StreamController<dynamic>.broadcast();
+
+  // Smoothing and global options
+  bool _palmRejection = false;
+  bool _smoothing = true;
+  bool _pressureOptimized = true;
+  double _lastX = 0;
+  double _lastY = 0;
+  bool _isFirstStroke = true;
+  final double _smoothAlpha = 0.3;
+
+  Uint8List? _previewImage;
+  List<Map<String, dynamic>> _savedRegions = [];
 
   @override
   void initState() {
     super.initState();
+    _loadShortcuts();
     _serverUri = widget.serverUri;
     _attachChannel(widget.channel);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _sendCommand({'cmd': 'get_state'});
     });
+  }
+
+  Future<void> _loadShortcuts() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _eraserShortcut = prefs.getString('eraser_shortcut') ?? 'e';
+      _drawShortcut = prefs.getString('draw_shortcut') ?? 'b';
+    });
+
+    final regionsStr = prefs.getString('signature_regions');
+    if (regionsStr != null) {
+      try {
+        final List<dynamic> decoded = jsonDecode(regionsStr);
+        setState(() {
+          _savedRegions = decoded.cast<Map<String, dynamic>>();
+        });
+      } catch (e) {
+        debugPrint("Failed to load regions: $e");
+      }
+    }
+  }
+
+  Future<void> _saveRegions() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('signature_regions', jsonEncode(_savedRegions));
   }
 
   void _attachChannel(WebSocketChannel channel) {
@@ -284,17 +329,25 @@ class _DrawingScreenState extends State<DrawingScreen> {
   }
 
   void _handleServerMessage(dynamic message) {
-    if (message is! String) {
-      return;
-    }
-
+    _messageBus.add(message);
+    if (!mounted) return;
     try {
       final decoded = jsonDecode(message);
       if (decoded is! Map<String, dynamic>) {
         return;
       }
 
-      if (decoded['cmd'] == 'region_state') {
+      if (decoded['cmd'] == 'region_preview' && decoded['image_b64'] != null) {
+        setState(() {
+          _previewImage = base64Decode(decoded['image_b64']);
+        });
+      } else if (decoded['cmd'] == 'region_selected' && decoded['region'] != null) {
+        setState(() {
+          _selectedRegion = decoded['region'];
+        });
+        _requestPreview();
+        _promptSaveRegion();
+      } else if (decoded['cmd'] == 'region_state') {
         final region = decoded['region'];
         setState(() {
           _regionModeEnabled = decoded['regionModeEnabled'] == true;
@@ -308,6 +361,45 @@ class _DrawingScreenState extends State<DrawingScreen> {
     } catch (_) {
       // Ignore non-JSON server messages.
     }
+  }
+
+  void _requestPreview() {
+    if (_selectedRegion != null) {
+      _sendCommand({'cmd': 'get_region_preview', 'region': _selectedRegion});
+    }
+  }
+
+  Future<void> _promptSaveRegion() async {
+    if (_selectedRegion == null) return;
+    final nameCtrl = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text('Save Signature Region', style: TextStyle(color: Colors.white)),
+        content: TextField(
+          controller: nameCtrl,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(labelText: 'Region Name', labelStyle: TextStyle(color: Colors.white54)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(color: Colors.white54))),
+          TextButton(
+            onPressed: () {
+              setState(() {
+                _savedRegions.add({
+                  'name': nameCtrl.text.isNotEmpty ? nameCtrl.text : 'Untitled Region',
+                  'region': _selectedRegion,
+                });
+              });
+              _saveRegions();
+              Navigator.pop(ctx);
+            },
+            child: const Text('Save', style: TextStyle(color: Color(0xFF6C63FF))),
+          ),
+        ],
+      ),
+    );
   }
 
   String _regionSummary() {
@@ -456,15 +548,41 @@ class _DrawingScreenState extends State<DrawingScreen> {
     _eventBuffer.clear();
   }
 
-  DrawEvent _pointerToEvent(PointerEvent e, String type) {
+  DrawEvent? _pointerToEvent(PointerEvent e, String type) {
+    if (_palmRejection && e.kind != PointerDeviceKind.stylus) {
+      return null;
+    }
+
     final size = _canvasSize ?? MediaQuery.of(context).size;
     final safeWidth = size.width <= 0 ? 1.0 : size.width;
     final safeHeight = size.height <= 0 ? 1.0 : size.height;
     final mappedX = (e.localPosition.dx / safeWidth).clamp(0.0, 1.0);
     final mappedY = (e.localPosition.dy / safeHeight).clamp(0.0, 1.0);
 
+    if (type == 'down') _isFirstStroke = true;
+
+    double finalX = mappedX;
+    double finalY = mappedY;
+
+    if (_smoothing) {
+      if (_isFirstStroke) {
+        _lastX = mappedX;
+        _lastY = mappedY;
+      } else {
+        _lastX = _lastX + _smoothAlpha * (mappedX - _lastX);
+        _lastY = _lastY + _smoothAlpha * (mappedY - _lastY);
+      }
+      finalX = _lastX;
+      finalY = _lastY;
+    }
+    _isFirstStroke = false;
+
     double pressure = e.pressure.clamp(0.0, 1.0);
     if (pressure == 0.0 && type != 'up') pressure = 1.0;
+    
+    if (_pressureOptimized) {
+      pressure = pow(pressure, 0.7).toDouble();
+    }
     pressure = (pressure * _pressureMultiplier).clamp(0.0, 1.0);
 
     final tiltX = (e.tilt * _tiltSensitivity * (e.radiusMajor > 0 ? 1 : 0)).clamp(-90.0, 90.0);
@@ -476,8 +594,8 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
     return DrawEvent(
       type: type,
-      x: mappedX,
-      y: mappedY,
+      x: finalX,
+      y: finalY,
       normalized: true,
       sourceWidth: safeWidth,
       sourceHeight: safeHeight,
@@ -490,11 +608,20 @@ class _DrawingScreenState extends State<DrawingScreen> {
     );
   }
 
-  void _handlePointerDown(PointerDownEvent e) => _queueEvent(_pointerToEvent(e, 'down'));
-  void _handlePointerMove(PointerMoveEvent e) => _queueEvent(_pointerToEvent(e, 'move'));
+  void _handlePointerDown(PointerDownEvent e) {
+    final evt = _pointerToEvent(e, 'down');
+    if (evt != null) _queueEvent(evt);
+  }
+  void _handlePointerMove(PointerMoveEvent e) {
+    final evt = _pointerToEvent(e, 'move');
+    if (evt != null) _queueEvent(evt);
+  }
   void _handlePointerUp(PointerUpEvent e) {
-    _queueEvent(_pointerToEvent(e, 'up'));
-    _flush(); // force flush on up for responsiveness
+    final evt = _pointerToEvent(e, 'up');
+    if (evt != null) {
+      _queueEvent(evt);
+      _flush(); // force flush on up for responsiveness
+    }
   }
 
   @override
@@ -502,6 +629,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
     _flushTimer?.cancel();
     _channelSubscription?.cancel();
     _channel.sink.close();
+    _messageBus.close();
     super.dispose();
   }
 
@@ -509,53 +637,31 @@ class _DrawingScreenState extends State<DrawingScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F1A),
+      drawer: _buildDrawer(),
       body: SafeArea(
-        child: Column(
+        child: Stack(
           children: [
-            _buildToolbar(),
-            Expanded(
-              child: Listener(
-                onPointerDown: _handlePointerDown,
-                onPointerMove: _handlePointerMove,
-                onPointerUp: _handlePointerUp,
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    _canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
-                    return Container(
-                      width: double.infinity,
-                      height: double.infinity,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF0D1117),
-                        border: Border.all(
-                          color: _connected
-                              ? const Color(0xFF6C63FF).withOpacity(0.4)
-                              : Colors.red.withOpacity(0.4),
-                          width: 1.5,
-                        ),
-                      ),
-                      child: Stack(
-                        children: [
-                          CustomPaint(painter: _GridPainter(), size: Size.infinite),
-                          Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.touch_app_outlined,
-                                    size: 40,
-                                    color: Colors.white.withOpacity(0.08)),
-                                const SizedBox(height: 8),
-                                Text('Draw here',
-                                    style: TextStyle(
-                                        color: Colors.white.withOpacity(0.08),
-                                        fontSize: 18)),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  },
-                ),
+            Positioned.fill(
+              child: _buildCurrentMode(),
+            ),
+            Positioned(
+              top: 16,
+              left: 16,
+              child: Builder(
+                builder: (context) {
+                  return Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1A1A2E).withValues(alpha: 0.8),
+                      shape: BoxShape.circle,
+                      boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.menu, color: Colors.white),
+                      onPressed: () => Scaffold.of(context).openDrawer(),
+                      tooltip: 'Menu',
+                    ),
+                  );
+                }
               ),
             ),
           ],
@@ -564,140 +670,328 @@ class _DrawingScreenState extends State<DrawingScreen> {
     );
   }
 
-  Widget _buildToolbar() {
-    final flushLabel = '${(1000 / _flushIntervalMs).round()}Hz';
-    final mappingModeLabel = _regionModeEnabled ? _regionSummary() : 'Full screen';
-
-    return Container(
-      height: 48,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A1A2E),
-        border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.08))),
-      ),
-      child: SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
-          children: [
-            const Icon(Icons.draw, color: Color(0xFF6C63FF), size: 20),
-            const SizedBox(width: 8),
-            const Text('DrawTab', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-            const SizedBox(width: 16),
-            _ToolBtn(
-              icon: _eraserMode ? Icons.auto_fix_high : Icons.brush,
-              active: _eraserMode,
-              tooltip: 'Eraser',
-              onTap: () => setState(() => _eraserMode = !_eraserMode),
-            ),
-            const SizedBox(width: 4),
-            _ToolBtn(
-              icon: _regionModeEnabled ? Icons.crop_square : Icons.open_with,
-              active: _regionModeEnabled,
-              tooltip: 'Region mode: $mappingModeLabel',
-              onTap: () => _setRegionMode(!_regionModeEnabled),
-            ),
-            const SizedBox(width: 4),
-            _ToolBtn(
-              icon: Icons.select_all,
-              active: _regionSelectionPending,
-              tooltip: 'Select desktop region',
-              onTap: _requestRegionSelection,
-            ),
-            const SizedBox(width: 4),
-            Text(
-              mappingModeLabel,
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
-            ),
-            const SizedBox(width: 8),
-            _SliderTool(
-              icon: Icons.compress,
-              value: _pressureMultiplier,
-              min: 0.5,
-              max: 2.0,
-              tooltip: 'Pressure: ${_pressureMultiplier.toStringAsFixed(1)}x',
-              onChanged: (v) => setState(() => _pressureMultiplier = v),
-            ),
-            const SizedBox(width: 8),
-            PopupMenuButton<int>(
-              tooltip: 'Flush rate: $flushLabel',
-              onSelected: _setFlushInterval,
-              itemBuilder: (context) => const [
-                PopupMenuItem(value: 8, child: Text('120 Hz')),
-                PopupMenuItem(value: 12, child: Text('83 Hz')),
-                PopupMenuItem(value: 16, child: Text('60 Hz')),
-                PopupMenuItem(value: 20, child: Text('50 Hz')),
-                PopupMenuItem(value: 25, child: Text('40 Hz')),
-              ],
-              child: Container(
-                height: 32,
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.04),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.white.withOpacity(0.08)),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.timer_outlined, size: 16, color: Colors.white54),
-                    const SizedBox(width: 6),
-                    Text(flushLabel, style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                    const SizedBox(width: 2),
-                    const Icon(Icons.arrow_drop_down, size: 18, color: Colors.white54),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+  Widget _buildCurrentMode() {
+    if (_currentIndex == 1) {
+      return InputPanelScreen(sendCommand: _sendCommand);
+    } else {
+      return Listener(
+        onPointerDown: _handlePointerDown,
+        onPointerMove: _handlePointerMove,
+        onPointerUp: _handlePointerUp,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            _canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+            return Container(
+              width: double.infinity,
+              height: double.infinity,
               decoration: BoxDecoration(
-                color: _connected
-                    ? const Color(0xFF1DB954).withOpacity(0.15)
-                    : Colors.red.withOpacity(0.15),
-                borderRadius: BorderRadius.circular(20),
+                color: const Color(0xFF0D1117),
                 border: Border.all(
                   color: _connected
-                      ? const Color(0xFF1DB954).withOpacity(0.5)
-                      : Colors.red.withOpacity(0.5),
+                      ? const Color(0xFF6C63FF).withValues(alpha: 0.4)
+                      : Colors.red.withValues(alpha: 0.4),
+                  width: 1.5,
                 ),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
+              child: Stack(
                 children: [
-                  Container(
-                    width: 7, height: 7,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _connected ? const Color(0xFF1DB954) : Colors.red,
+                  CustomPaint(painter: _GridPainter(), size: Size.infinite),
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _currentIndex == 2 ? Icons.edit_document : Icons.touch_app_outlined,
+                          size: 40,
+                          color: Colors.white.withValues(alpha: 0.08)
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _currentIndex == 2 ? 'Sign Here' : 'Draw here',
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.08),
+                              fontSize: 18)
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  Text(_status,
-                      style: TextStyle(
-                          fontSize: 12,
-                          color: _connected ? const Color(0xFF1DB954) : Colors.red)),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+    }
+  }
+
+  void _showSettingsDialog() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      isScrollControlled: true,
+      builder: (context) {
+        return StatefulBuilder(builder: (context, setModalState) {
+          return Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom, left: 16, right: 16, top: 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Drawing Settings', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  title: const Text('Palm Rejection', style: TextStyle(color: Colors.white)),
+                  value: _palmRejection,
+                  onChanged: (v) { setState(() => _palmRejection = v); setModalState((){}); },
+                ),
+                SwitchListTile(
+                  title: const Text('Stroke Smoothing', style: TextStyle(color: Colors.white)),
+                  value: _smoothing,
+                  onChanged: (v) { setState(() => _smoothing = v); setModalState((){}); },
+                ),
+                SwitchListTile(
+                  title: const Text('Pressure Optimization', style: TextStyle(color: Colors.white)),
+                  value: _pressureOptimized,
+                  onChanged: (v) { setState(() => _pressureOptimized = v); setModalState((){}); },
+                ),
+                const Divider(color: Colors.white24),
+                const Text('Active Region', style: TextStyle(color: Colors.white, fontSize: 16)),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButton<Map<String, dynamic>>(
+                        dropdownColor: const Color(0xFF1A1A2E),
+                        isExpanded: true,
+                        hint: const Text('Select a saved region', style: TextStyle(color: Colors.white54)),
+                        value: _savedRegions.where((e) => e['region'] == _selectedRegion).firstOrNull,
+                        items: _savedRegions.map((item) {
+                          return DropdownMenuItem<Map<String, dynamic>>(
+                            value: item,
+                            child: Text(item['name'], style: const TextStyle(color: Colors.white)),
+                          );
+                        }).toList(),
+                        onChanged: (item) {
+                          if (item != null) {
+                            setState(() {
+                              _selectedRegion = item['region'];
+                            });
+                            setModalState((){});
+                            _sendCommand({'cmd': 'region_mode', 'enabled': true});
+                            _requestPreview();
+                          }
+                        },
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.crop, color: Color(0xFF6C63FF)),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        _sendCommand({'cmd': 'select_region'});
+                      },
+                    ),
+                  ],
+                ),
+                if (_previewImage != null) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    height: 120,
+                    width: double.infinity,
+                    decoration: BoxDecoration(border: Border.all(color: Colors.white24)),
+                    child: Image.memory(_previewImage!, fit: BoxFit.contain),
+                  ),
+                ],
+                const SizedBox(height: 16),
+              ],
+            ),
+          );
+        });
+      },
+    );
+  }
+  Widget _buildDrawer() {
+    return Drawer(
+      backgroundColor: const Color(0xFF1A1A2E),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(16),
+              alignment: Alignment.centerLeft,
+              child: const Text(
+                'DrawTab Options',
+                style: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  ListTile(
+                    leading: Icon(Icons.draw, color: _currentIndex == 0 ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: const Text('Draw Mode', style: TextStyle(color: Colors.white)),
+                    selected: _currentIndex == 0,
+                    onTap: () {
+                      setState(() => _currentIndex = 0);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.keyboard, color: _currentIndex == 1 ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: const Text('Keypad Mode', style: TextStyle(color: Colors.white)),
+                    selected: _currentIndex == 1,
+                    onTap: () {
+                      setState(() => _currentIndex = 1);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.edit_document, color: _currentIndex == 2 ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: const Text('Sign Mode', style: TextStyle(color: Colors.white)),
+                    selected: _currentIndex == 2,
+                    onTap: () {
+                      setState(() => _currentIndex = 2);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  const Divider(color: Colors.white24),
+                  ListTile(
+                    leading: const Icon(Icons.settings, color: Colors.white54),
+                    title: const Text('Settings', style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _showSettingsDialog();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.undo, color: Colors.white54),
+                    title: const Text('Undo (Ctrl+Z)', style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      _sendCommand({
+                        'cmd': 'key',
+                        'keys': ['ctrl', 'z']
+                      });
+                      Navigator.pop(context);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(_eraserMode ? Icons.auto_fix_high : Icons.brush, color: _eraserMode ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: Text('Toggle Tool [$_eraserShortcut/$_drawShortcut]', style: const TextStyle(color: Colors.white)),
+                    subtitle: const Text('Long press to configure', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                    onTap: () {
+                      setState(() {
+                        _eraserMode = !_eraserMode;
+                      });
+                      _sendCommand({
+                        'cmd': 'key',
+                        'keys': [_eraserMode ? _eraserShortcut : _drawShortcut]
+                      });
+                    },
+                    onLongPress: _showShortcutConfigDialog,
+                  ),
+                  ListTile(
+                    leading: Icon(_regionModeEnabled ? Icons.crop_square : Icons.open_with, color: _regionModeEnabled ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: Text('Region mode: ${_regionModeEnabled ? _regionSummary() : 'Full screen'}', style: const TextStyle(color: Colors.white)),
+                    onTap: () => _setRegionMode(!_regionModeEnabled),
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.select_all, color: Colors.white54),
+                    title: const Text('Select desktop region', style: TextStyle(color: Colors.white)),
+                    onTap: () {
+                      Navigator.pop(context);
+                      _requestRegionSelection();
+                    },
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Pressure: ${_pressureMultiplier.toStringAsFixed(1)}x', style: const TextStyle(color: Colors.white)),
+                        Slider(
+                          value: _pressureMultiplier,
+                          min: 0.5,
+                          max: 2.0,
+                          activeColor: const Color(0xFF6C63FF),
+                          inactiveColor: Colors.white24,
+                          onChanged: (v) => setState(() => _pressureMultiplier = v),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: _reconnecting
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
-                    )
-                  : const Icon(Icons.refresh, size: 20, color: Colors.white54),
-              tooltip: 'Reconnect',
-              onPressed: _reconnecting ? null : _reconnect,
-            ),
-            IconButton(
-              icon: const Icon(Icons.close, size: 20, color: Colors.white54),
-              onPressed: () => Navigator.pop(context),
+            const Divider(color: Colors.white24),
+            ListTile(
+              leading: Icon(_connected ? Icons.cloud_done : Icons.cloud_off, color: _connected ? const Color(0xFF1DB954) : Colors.red),
+              title: Text('Status: $_status', style: const TextStyle(color: Colors.white)),
+              trailing: _reconnecting
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
+                  : IconButton(
+                      icon: const Icon(Icons.refresh, color: Colors.white54),
+                      onPressed: _reconnecting ? null : _reconnect,
+                    ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showShortcutConfigDialog() {
+    final eraserCtrl = TextEditingController(text: _eraserShortcut);
+    final drawCtrl = TextEditingController(text: _drawShortcut);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1A2E),
+        title: const Text('Configure Tool Shortcuts', style: TextStyle(color: Colors.white)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: drawCtrl,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: 'Draw Tool Shortcut (e.g. p, b)',
+                labelStyle: TextStyle(color: Colors.white54),
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: eraserCtrl,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                labelText: 'Eraser Tool Shortcut (e.g. e)',
+                labelStyle: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () async {
+              final prefs = await SharedPreferences.getInstance();
+              final newDraw = drawCtrl.text.trim();
+              final newEraser = eraserCtrl.text.trim();
+              if (newDraw.isNotEmpty && newEraser.isNotEmpty) {
+                await prefs.setString('draw_shortcut', newDraw);
+                await prefs.setString('eraser_shortcut', newEraser);
+                setState(() {
+                  _drawShortcut = newDraw;
+                  _eraserShortcut = newEraser;
+                });
+              }
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Save', style: TextStyle(color: Color(0xFF6C63FF))),
+          ),
+        ],
       ),
     );
   }
@@ -708,7 +1002,8 @@ class _ToolBtn extends StatelessWidget {
   final bool active;
   final String tooltip;
   final VoidCallback onTap;
-  const _ToolBtn({required this.icon, required this.active, required this.tooltip, required this.onTap});
+  final VoidCallback? onLongPress;
+  const _ToolBtn({required this.icon, required this.active, required this.tooltip, required this.onTap, this.onLongPress});
 
   @override
   Widget build(BuildContext context) {
@@ -716,6 +1011,7 @@ class _ToolBtn extends StatelessWidget {
       message: tooltip,
       child: GestureDetector(
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Container(
           width: 32, height: 32,
           decoration: BoxDecoration(
@@ -743,14 +1039,14 @@ class _SliderTool extends StatelessWidget {
       message: tooltip,
       child: Row(
         children: [
-          Icon(icon, size: 16, color: Colors.white38),
+          Icon(icon, size: 14, color: Colors.white38),
           SizedBox(
-            width: 80,
+            width: 60,
             child: SliderTheme(
               data: SliderTheme.of(context).copyWith(
                 trackHeight: 2,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 10),
                 activeTrackColor: const Color(0xFF6C63FF),
                 thumbColor: const Color(0xFF6C63FF),
                 inactiveTrackColor: Colors.white12,

@@ -24,6 +24,14 @@ import threading
 from dataclasses import dataclass
 from typing import Optional, Any
 import math
+import base64
+import io
+
+try:
+    from PIL import ImageGrab
+    HAS_PILLOW = True
+except ImportError:
+    HAS_PILLOW = False
 
 # ─── Optional screen mirror imports ──────────────────────────────────────────
 try:
@@ -122,10 +130,10 @@ PORTRAIT_MIN_SIZE = (320, 480)
 LANDSCAPE_MIN_SIZE = (480, 320)
 
 # Interpolation: maximum pixels per injected step. Lower = smoother curves.
-INTERPOLATION_MAX_PIXEL_STEP = 4
+INTERPOLATION_MAX_PIXEL_STEP = 2
 # Minimum time (ms) between events to trigger interpolation; if events are frequent
 # we skip adding intermediates to avoid overload/lag.
-INTERPOLATION_MIN_TIME_MS = 4
+INTERPOLATION_MIN_TIME_MS = 2
 
 
 def run_region_selector_app() -> Optional[dict]:
@@ -420,6 +428,7 @@ class MacOSInputInjector(InputInjector):
     def __init__(self, width, height):
         super().__init__(width, height)
         try:
+            # pyrefly: ignore [missing-import]
             import Quartz
             self.Quartz = Quartz
         except ImportError:
@@ -461,6 +470,7 @@ class LinuxInputInjector(InputInjector):
 
     def _setup_uinput(self):
         try:
+            # pyrefly: ignore [missing-import]
             import uinput
             self.uinput = uinput
             # Define virtual tablet device capabilities
@@ -567,6 +577,7 @@ class DrawTabServer:
         self._region_selection_lock = asyncio.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._hotkey_listener = None
+        self.keyboard_controller = pynput_keyboard.Controller() if HAS_PYNPUT else None
 
         # Latency stats
         self._evt_count = 0
@@ -575,6 +586,18 @@ class DrawTabServer:
         self._debug_logged_events = 0
         # Track last injected screen point for interpolation smoothing
         self._last_injected: Optional[dict] = None
+        self._stroke_points = []
+
+    def quadratic_bezier(self, p0, p1, p2, t):
+        x = ((1 - t) ** 2) * p0[0] + \
+            2 * (1 - t) * t * p1[0] + \
+            (t ** 2) * p2[0]
+
+        y = ((1 - t) ** 2) * p0[1] + \
+            2 * (1 - t) * t * p1[1] + \
+            (t ** 2) * p2[1]
+
+        return int(x), int(y)
 
     def _process_batch(self, batch: list):
         now_us = time.monotonic_ns() // 1000
@@ -631,71 +654,160 @@ class DrawTabServer:
             self._max_lag_ms = 0.0
             self._last_report = now
 
+    # def _inject_with_interpolation(self, evt: DrawEvent, region: Optional[dict]):
+    #     """Inject an event, inserting interpolated move events between the
+    #     previously injected point and this event to smooth strokes.
+    #     """
+    #     # Guard: injector must be ready
+    #     if not self.injector:
+    #         log.warning("Injector not ready, dropping event")
+    #         return
+
+    #     # Compute target screen coordinates for this event
+    #     sx, sy = evt.to_screen(self.width, self.height, region)
+
+    #     prev = self._last_injected
+    #     if evt.type == 'down':
+    #         self._stroke_points = [(sx, sy)]
+
+    #     # elif evt.type == 'move':
+    #     #     self._stroke_points.append((sx, sy))
+    #     elif evt.type == 'move':
+    #         self._stroke_points.append((sx, sy))
+
+    #         if len(self._stroke_points) > 10:
+    #             self._stroke_points.pop(0)
+
+    #     # Decide whether to interpolate: only when previous point exists and pen was down
+    #     #if isinstance(prev, dict) and prev.get('pen_down', False) and evt.type in ('move', 'up'):
+    #     if len(self._stroke_points) >= 3:
+    #         p0 = self._stroke_points[-3]
+    #         p1 = self._stroke_points[-2]
+    #         p2 = self._stroke_points[-1]
+
+    #         for i in range(1, 17):
+
+    #             t = i / 16
+
+    #             bx, by = self.quadratic_bezier(
+    #                 p0,
+    #                 p1,
+    #                 p2,
+    #                 t
+    #             )
+    #             region_left = region.get('left', 0) if region else 0
+    #             region_top = region.get('top', 0) if region else 0
+
+    #             synthetic = DrawEvent(
+    #                 type='move',
+    #                 x=bx - region_left,
+    #                 y=by - region_top,
+    #                 normalized=False,
+    #                 sourceWidth=0,
+    #                 sourceHeight=0,
+    #                 pressure=evt.pressure,
+    #                 tiltX=evt.tiltX,
+    #                 tiltY=evt.tiltY,
+    #                 isPen=evt.isPen,
+    #                 buttons=evt.buttons,
+    #                 ts=evt.ts
+    #             )
+
+    #             self.injector.inject(
+    #                 synthetic,
+    #                 region
+    #             )
+
+    #     # Finally inject the real event
+    #     self.injector.inject(evt, region)
+
+    #     # Update last injected point state
+    #     pen_down = True if evt.type in ('down', 'move') else False
+    #     if evt.type == 'up':
+    #         pen_down = False
+    #         self._stroke_points.clear()
+    #     self._last_injected = {
+    #         'x': sx,
+    #         'y': sy,
+    #         'pressure': float(evt.pressure),
+    #         'pen_down': pen_down,
+    #         'ts': evt.ts,
+    #     }
+
     def _inject_with_interpolation(self, evt: DrawEvent, region: Optional[dict]):
-        """Inject an event, inserting interpolated move events between the
-        previously injected point and this event to smooth strokes.
         """
-        # Guard: injector must be ready
+        Inject event with smooth interpolation.
+        Uses the original interpolation system but generates
+        more points for smoother strokes.
+        """
+
         if not self.injector:
             log.warning("Injector not ready, dropping event")
             return
 
-        # Compute target screen coordinates for this event
         sx, sy = evt.to_screen(self.width, self.height, region)
 
         prev = self._last_injected
 
-        # Decide whether to interpolate: only when previous point exists and pen was down
-        if isinstance(prev, dict) and prev.get('pen_down', False) and evt.type in ('move', 'up'):
-            dx = sx - prev['x']
-            dy = sy - prev['y']
-            dist = math.hypot(dx, dy)
-            # Only interpolate when the incoming events are sparse enough
-            steps = 0
-            prev_ts = prev.get('ts') if isinstance(prev, dict) else None
-            if isinstance(prev_ts, (int, float)) and isinstance(evt.ts, (int, float)):
-                dt_ms = (evt.ts - prev_ts) / 1000.0
-                if dt_ms >= INTERPOLATION_MIN_TIME_MS:
-                    step_px = max(1, INTERPOLATION_MAX_PIXEL_STEP)
-                    steps = int(dist / step_px)
-            if steps > 0:
-                # Precompute region offsets
-                target_left = int(region.get('left', 0)) if region else 0
-                target_top = int(region.get('top', 0)) if region else 0
-                for i in range(1, steps + 1):
-                    t = i / (steps + 1)
-                    ix = int(prev['x'] + dx * t)
-                    iy = int(prev['y'] + dy * t)
-                    # Convert to coordinates relative to region (so injector.to_screen doesn't double-offset)
-                    local_x = ix - target_left
-                    local_y = iy - target_top
-                    # Interpolate pressure
-                    prev_pressure = float(prev.get('pressure', evt.pressure))
-                    ipress = prev_pressure + (evt.pressure - prev_pressure) * t
+        if (
+            isinstance(prev, dict)
+            and prev.get('pen_down', False)
+            and evt.type in ('move', 'up')
+        ):
+
+            px = prev['x']
+            py = prev['y']
+
+            dx = sx - px
+            dy = sy - py
+
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            # Skip interpolation for tiny movements
+            if distance > 2:
+
+                # More interpolation points = smoother lines
+                steps = max(
+                    1,
+                    int(distance / 1.5)
+                )
+
+                region_left = region.get('left', 0) if region else 0
+                region_top = region.get('top', 0) if region else 0
+
+                for step in range(1, steps):
+
+                    t = step / steps
+
+                    ix = px + dx * t
+                    iy = py + dy * t
+
                     synthetic = DrawEvent(
                         type='move',
-                        x=float(local_x),
-                        y=float(local_y),
+                        x=ix - region_left,
+                        y=iy - region_top,
                         normalized=False,
-                        sourceWidth=0.0,
-                        sourceHeight=0.0,
-                        pressure=float(ipress),
-                        tiltX=0.0,
-                        tiltY=0.0,
+                        sourceWidth=0,
+                        sourceHeight=0,
+                        pressure=float(prev.get('pressure', evt.pressure))
+                        + (evt.pressure - float(prev.get('pressure', evt.pressure))) * t,
+                        tiltX=evt.tiltX,
+                        tiltY=evt.tiltY,
                         isPen=evt.isPen,
                         buttons=evt.buttons,
-                        ts=evt.ts,
+                        ts=evt.ts
                     )
-                    # injector will map non-normalized coords as absolute pixels
-                    self.injector.inject(synthetic, region)
 
-        # Finally inject the real event
+                    self.injector.inject(
+                        synthetic,
+                        region
+                    )
+
+        # Inject actual event
         self.injector.inject(evt, region)
 
-        # Update last injected point state
-        pen_down = True if evt.type in ('down', 'move') else False
-        if evt.type == 'up':
-            pen_down = False
+        pen_down = evt.type in ('down', 'move')
+
         self._last_injected = {
             'x': sx,
             'y': sy,
@@ -703,6 +815,9 @@ class DrawTabServer:
             'pen_down': pen_down,
             'ts': evt.ts,
         }
+
+        if evt.type == 'up':
+            self._last_injected['pen_down'] = False
 
     async def handle_client(self, ws: Any):
         addr = ws.remote_address
@@ -729,6 +844,10 @@ class DrawTabServer:
                     elif data.get('cmd') == 'select_region':
                         await self._select_region_from_overlay()
                         await self._broadcast_region_state()
+                    elif data.get('cmd') == 'key':
+                        self._handle_key_command(data.get('keys', []))
+                    elif data.get('cmd') == 'get_region_preview':
+                        await self._handle_get_region_preview(ws, data.get('region'))
                 except json.JSONDecodeError:
                     log.warning("Invalid JSON received")
                 except Exception as e:
@@ -738,6 +857,82 @@ class DrawTabServer:
         finally:
             self.clients.discard(ws)
             log.info(f"Client disconnected: {addr}")
+
+    async def _handle_get_region_preview(self, ws: Any, region: dict):
+        if not HAS_PILLOW:
+            log.warning("Pillow not installed, cannot generate preview.")
+            return
+        if not region:
+            return
+        try:
+            x, y = int(region.get('x', 0)), int(region.get('y', 0))
+            w, h = int(region.get('width', 0)), int(region.get('height', 0))
+            if w <= 0 or h <= 0:
+                return
+
+            def _grab():
+                return ImageGrab.grab(bbox=(x, y, x + w, y + h))
+
+            img = await self._loop.run_in_executor(None, _grab)
+            
+            max_dim = 800
+            if img.width > max_dim or img.height > max_dim:
+                img.thumbnail((max_dim, max_dim))
+            
+            buf = io.BytesIO()
+            img.save(buf, format='JPEG', quality=70)
+            b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+            
+            await ws.send(json.dumps({
+                'cmd': 'region_preview',
+                'image_b64': b64
+            }))
+        except Exception as e:
+            log.error(f"Error generating preview: {e}")
+
+    def _handle_key_command(self, keys: list):
+        if not self.keyboard_controller:
+            log.warning("Keyboard injection requested but pynput not available")
+            return
+            
+        vk_map = {
+            'ctrl': pynput_keyboard.Key.ctrl,
+            'shift': pynput_keyboard.Key.shift,
+            'alt': pynput_keyboard.Key.alt,
+            'win': pynput_keyboard.Key.cmd,
+            'cmd': pynput_keyboard.Key.cmd,
+            'enter': pynput_keyboard.Key.enter,
+            'backspace': pynput_keyboard.Key.backspace,
+            'tab': pynput_keyboard.Key.tab,
+            'space': pynput_keyboard.Key.space,
+            'esc': pynput_keyboard.Key.esc,
+            'escape': pynput_keyboard.Key.esc,
+            'up': pynput_keyboard.Key.up,
+            'down': pynput_keyboard.Key.down,
+            'left': pynput_keyboard.Key.left,
+            'right': pynput_keyboard.Key.right,
+            'capslock': pynput_keyboard.Key.caps_lock,
+        }
+        for i in range(1, 13):
+            vk_map[f'f{i}'] = getattr(pynput_keyboard.Key, f'f{i}')
+
+        pressed = []
+        try:
+            for k in keys:
+                k = str(k).lower()
+                key_obj = vk_map.get(k, k)
+                self.keyboard_controller.press(key_obj)
+                pressed.append(key_obj)
+            
+            time.sleep(0.01)
+        except Exception as e:
+            log.error(f"Error pressing keys {keys}: {e}")
+        finally:
+            for key_obj in reversed(pressed):
+                try:
+                    self.keyboard_controller.release(key_obj)
+                except Exception:
+                    pass
 
     async def _send_region_state(self, ws: Any):
         await ws.send(json.dumps({
