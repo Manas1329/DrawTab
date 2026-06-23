@@ -143,7 +143,7 @@ INTERPOLATION_MAX_PIXEL_STEP = 2
 INTERPOLATION_MIN_TIME_MS = 2
 
 
-def run_region_selector_app() -> Optional[dict]:
+def run_region_selector_app(preset: str = 'mobile') -> Optional[dict]:
     try:
         import tkinter as tk
     except ImportError:
@@ -154,7 +154,7 @@ def run_region_selector_app() -> Optional[dict]:
     done = False
 
     root = tk.Tk()
-    root.title('DrawTab Region Selector')
+    root.title(f'DrawTab Region Selector - {preset.capitalize()}')
     root.attributes('-topmost', True)
     try:
         root.attributes('-alpha', 1.0)
@@ -170,12 +170,24 @@ def run_region_selector_app() -> Optional[dict]:
     max_width = screen_w
     max_height = screen_h
 
-    def orientation_profile(mode: str) -> tuple[tuple[int, int], tuple[int, int]]:
-        if mode == 'landscape':
-            return LANDSCAPE_PRESET_SIZE, LANDSCAPE_MIN_SIZE
-        return PORTRAIT_PRESET_SIZE, PORTRAIT_MIN_SIZE
+    # Presets definition
+    presets = {
+        'mobile': {'landscape': (640, 360), 'portrait': (360, 640), 'min_landscape': (480, 320), 'min_portrait': (320, 480)},
+        'tablet': {'landscape': (1024, 768), 'portrait': (768, 1024), 'min_landscape': (800, 600), 'min_portrait': (600, 800)},
+        'signature': {'landscape': (500, 250), 'portrait': (300, 400), 'min_landscape': (300, 150), 'min_portrait': (200, 250)},
+        'custom': {'landscape': (800, 600), 'portrait': (600, 800), 'min_landscape': (100, 100), 'min_portrait': (100, 100)},
+    }
+    
+    if preset not in presets:
+        preset = 'mobile'
 
-    base_size, min_size = orientation_profile('portrait')
+    def orientation_profile(mode: str) -> tuple[tuple[int, int], tuple[int, int]]:
+        p = presets[preset]
+        if mode == 'landscape':
+            return p['landscape'], p['min_landscape']
+        return p['portrait'], p['min_portrait']
+
+    base_size, min_size = orientation_profile('portrait' if preset != 'signature' else 'landscape')
     scale = min(screen_w / base_size[0], screen_h / base_size[1], 1.0)
     width = max(min_size[0], int(base_size[0] * scale))
     height = max(min_size[1], int(base_size[1] * scale))
@@ -200,7 +212,7 @@ def run_region_selector_app() -> Optional[dict]:
 
     title = tk.Label(
         header,
-        text='DrawTab Region Selector',
+        text=f'DrawTab Region Selector ({preset.capitalize()})',
         fg='white',
         bg='#6C63FF',
         font=('Segoe UI', 11, 'bold')
@@ -231,21 +243,6 @@ def run_region_selector_app() -> Optional[dict]:
     )
     orientation_label.pack(side='left', padx=(0, 8))
 
-    body = tk.Frame(frame, bg='#111827')
-    body.pack(fill='both', expand=True, padx=12, pady=(116, 12))
-
-    info = tk.Label(
-        body,
-        text='Region will map only within this window area.\nDefault size is mobile-like and can be resized up to the monitor bounds.',
-        fg='white',
-        bg='#111827',
-        justify='left',
-        anchor='nw',
-        wraplength=max(220, width - 48),
-        font=('Segoe UI', 12)
-    )
-    info.pack(anchor='nw', fill='x')
-
     def apply_orientation(next_orientation: str):
         nonlocal orientation
         orientation = next_orientation
@@ -262,7 +259,6 @@ def run_region_selector_app() -> Optional[dict]:
         root.minsize(next_min_size[0], next_min_size[1])
         root.maxsize(max_width, max_height)
         hint.configure(wraplength=max(220, next_width - 24))
-        info.configure(wraplength=max(220, next_width - 48))
         sync_orientation_buttons()
 
     portrait_btn = tk.Button(
@@ -302,7 +298,6 @@ def run_region_selector_app() -> Optional[dict]:
     def on_resize(_event=None):
         current_width = root.winfo_width()
         hint.configure(wraplength=max(220, current_width - 24))
-        info.configure(wraplength=max(220, current_width - 48))
 
     root.bind('<Configure>', on_resize)
     sync_orientation_buttons()
@@ -323,18 +318,18 @@ def run_region_selector_app() -> Optional[dict]:
         root.update_idletasks()
         left = int(root.winfo_rootx())
         top = int(root.winfo_rooty())
-        width = int(root.winfo_width())
-        height = int(root.winfo_height())
+        r_width = int(root.winfo_width())
+        r_height = int(root.winfo_height())
         _, min_size = orientation_profile(orientation)
-        width = max(min_size[0], min(max_width, width))
-        height = max(min_size[1], min(max_height, height))
-        left = max(0, min(screen_w - width, left))
-        top = max(0, min(screen_h - height, top))
+        r_width = max(min_size[0], min(max_width, r_width))
+        r_height = max(min_size[1], min(max_height, r_height))
+        left = max(0, min(screen_w - r_width, left))
+        top = max(0, min(screen_h - r_height, top))
         return {
             'left': left,
             'top': top,
-            'width': width,
-            'height': height,
+            'width': r_width,
+            'height': r_height,
         }
 
     def on_confirm(_event=None):
@@ -857,8 +852,49 @@ class DrawTabServer:
                         self.region_mode_enabled = bool(data.get('enabled', False))
                         await self._broadcast_region_state()
                     elif data.get('cmd') == 'select_region':
-                        await self._select_region_from_overlay()
+                        preset = data.get('preset', 'mobile')
+                        await self._select_region_from_overlay(preset)
                         await self._broadcast_region_state()
+                    elif data.get('cmd') == 'adjust_region':
+                        if self.selected_region:
+                            dx = data.get('dx', 0)
+                            dy = data.get('dy', 0)
+                            scale = data.get('scale', 1.0)
+                            
+                            cw = self.selected_region['width']
+                            ch = self.selected_region['height']
+                            cx = self.selected_region['left'] + cw / 2
+                            cy = self.selected_region['top'] + ch / 2
+                            
+                            new_w = cw / scale
+                            new_h = ch / scale
+                            
+                            new_w = min(new_w, self.width)
+                            new_h = min(new_h, self.height)
+                            
+                            cx -= dx * new_w
+                            cy -= dy * new_h
+                            
+                            new_left = cx - new_w / 2
+                            new_top = cy - new_h / 2
+                            
+                            if new_left < 0:
+                                new_left = 0
+                            if new_left + new_w > self.width:
+                                new_left = self.width - new_w
+                                
+                            if new_top < 0:
+                                new_top = 0
+                            if new_top + new_h > self.height:
+                                new_top = self.height - new_h
+                                
+                            self.selected_region = {
+                                'left': int(new_left),
+                                'top': int(new_top),
+                                'width': int(new_w),
+                                'height': int(new_h)
+                            }
+                            await self._broadcast_region_state()
                     elif data.get('cmd') == 'key':
                         self._handle_key_command(data.get('keys', []))
                     elif data.get('cmd') == 'get_region_preview':
@@ -980,9 +1016,9 @@ class DrawTabServer:
         for ws in dead_clients:
             self.clients.discard(ws)
 
-    async def _select_region_from_overlay(self):
+    async def _select_region_from_overlay(self, preset: str = 'mobile'):
         async with self._region_selection_lock:
-            region = await asyncio.to_thread(self._select_region_blocking)
+            region = await asyncio.to_thread(self._select_region_blocking, preset)
             if region:
                 self.selected_region = region
                 log.info(
@@ -992,13 +1028,15 @@ class DrawTabServer:
             else:
                 log.info("Region selection cancelled")
 
-    def _select_region_blocking(self) -> Optional[dict]:
-        cmd = [sys.executable, os.path.abspath(__file__), '--select-region']
+    def _select_region_blocking(self, preset: str) -> Optional[dict]:
+        cmd = [sys.executable, os.path.abspath(__file__), '--select-region', preset]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if completed.stdout:
+                return json.loads(completed.stdout.strip())
         except Exception as exc:
             log.error(f"Failed to launch region selector: {exc}")
-            return None
+        return None
 
         output = (completed.stdout or '').strip()
         if not output:
@@ -1153,11 +1191,11 @@ def main():
     parser.add_argument('--width', type=int, default=0, help='Screen width (0=auto)')
     parser.add_argument('--height', type=int, default=0, help='Screen height (0=auto)')
     parser.add_argument('--mirror', action='store_true', help='Enable screen mirroring')
-    parser.add_argument('--select-region', action='store_true', help='Launch the region selector window and print the selected region as JSON')
+    parser.add_argument('--select-region', type=str, metavar='PRESET', help='Launch the region selector window with PRESET and print the selected region as JSON')
     args = parser.parse_args()
 
-    if args.select_region:
-        region = run_region_selector_app()
+    if args.select_region is not None:
+        region = run_region_selector_app(args.select_region)
         if region:
             print(json.dumps(region))
             return
