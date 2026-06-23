@@ -265,6 +265,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
   final double _smoothAlpha = 0.3;
 
   Uint8List? _previewImage;
+  Uint8List? _mirrorFrame;
   List<Map<String, dynamic>> _savedRegions = [];
 
   @override
@@ -336,8 +337,11 @@ class _DrawingScreenState extends State<DrawingScreen> {
       if (decoded is! Map<String, dynamic>) {
         return;
       }
-
-      if (decoded['cmd'] == 'region_preview' && decoded['image_b64'] != null) {
+      if (decoded['cmd'] == 'mirror_frame' && decoded['image_b64'] != null) {
+        setState(() {
+          _mirrorFrame = base64Decode(decoded['image_b64']);
+        });
+      } else if (decoded['cmd'] == 'region_preview' && decoded['image_b64'] != null) {
         setState(() {
           _previewImage = base64Decode(decoded['image_b64']);
         });
@@ -632,15 +636,26 @@ class _DrawingScreenState extends State<DrawingScreen> {
     _messageBus.close();
     super.dispose();
   }
+  void _setMode(int mode) {
+    setState(() {
+      _currentIndex = mode;
+      if (mode != 3) {
+        _mirrorFrame = null;
+      }
+    });
+    _sendCommand({
+      'cmd': 'set_mirror_mode',
+      'enabled': mode == 3,
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0F0F1A),
       drawer: _buildDrawer(),
-      body: SafeArea(
-        child: Stack(
-          children: [
+      body: Stack(
+        children: [
             Positioned.fill(
               child: _buildCurrentMode(),
             ),
@@ -664,10 +679,30 @@ class _DrawingScreenState extends State<DrawingScreen> {
                 }
               ),
             ),
+            Positioned(
+              top: 16,
+              right: 16,
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A2E).withValues(alpha: 0.8),
+                  shape: BoxShape.circle,
+                  boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0, 2))],
+                ),
+                child: IconButton(
+                  icon: const Icon(Icons.undo, color: Colors.white),
+                  onPressed: () {
+                    _sendCommand({
+                      'cmd': 'key',
+                      'keys': ['ctrl', 'z']
+                    });
+                  },
+                  tooltip: 'Undo (Ctrl+Z)',
+                ),
+              ),
+            ),
           ],
         ),
-      ),
-    );
+      );
   }
 
   Widget _buildCurrentMode() {
@@ -695,26 +730,37 @@ class _DrawingScreenState extends State<DrawingScreen> {
               ),
               child: Stack(
                 children: [
-                  CustomPaint(painter: _GridPainter(), size: Size.infinite),
-                  Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _currentIndex == 2 ? Icons.edit_document : Icons.touch_app_outlined,
-                          size: 40,
-                          color: Colors.white.withValues(alpha: 0.08)
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          _currentIndex == 2 ? 'Sign Here' : 'Draw here',
-                          style: TextStyle(
-                              color: Colors.white.withValues(alpha: 0.08),
-                              fontSize: 18)
-                        ),
-                      ],
+                  if (_currentIndex == 3 && _mirrorFrame != null)
+                    Positioned.fill(
+                      child: Image.memory(
+                        _mirrorFrame!,
+                        fit: BoxFit.fill,
+                        gaplessPlayback: true,
+                        filterQuality: FilterQuality.none,
+                      ),
                     ),
-                  ),
+                  if (_currentIndex != 3) ...[
+                    CustomPaint(painter: _GridPainter(), size: Size.infinite),
+                    Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _currentIndex == 2 ? Icons.edit_document : Icons.touch_app_outlined,
+                            size: 40,
+                            color: Colors.white.withValues(alpha: 0.08)
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _currentIndex == 2 ? 'Sign Here' : 'Draw here',
+                            style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.08),
+                                fontSize: 18)
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             );
@@ -831,7 +877,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                     title: const Text('Draw Mode', style: TextStyle(color: Colors.white)),
                     selected: _currentIndex == 0,
                     onTap: () {
-                      setState(() => _currentIndex = 0);
+                      _setMode(0);
                       Navigator.pop(context);
                     },
                   ),
@@ -840,7 +886,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                     title: const Text('Keypad Mode', style: TextStyle(color: Colors.white)),
                     selected: _currentIndex == 1,
                     onTap: () {
-                      setState(() => _currentIndex = 1);
+                      _setMode(1);
                       Navigator.pop(context);
                     },
                   ),
@@ -849,7 +895,16 @@ class _DrawingScreenState extends State<DrawingScreen> {
                     title: const Text('Sign Mode', style: TextStyle(color: Colors.white)),
                     selected: _currentIndex == 2,
                     onTap: () {
-                      setState(() => _currentIndex = 2);
+                      _setMode(2);
+                      Navigator.pop(context);
+                    },
+                  ),
+                  ListTile(
+                    leading: Icon(Icons.connected_tv, color: _currentIndex == 3 ? const Color(0xFF6C63FF) : Colors.white54),
+                    title: const Text('Mirror Mode', style: TextStyle(color: Colors.white)),
+                    selected: _currentIndex == 3,
+                    onTap: () {
+                      _setMode(3);
                       Navigator.pop(context);
                     },
                   ),
@@ -922,6 +977,14 @@ class _DrawingScreenState extends State<DrawingScreen> {
               ),
             ),
             const Divider(color: Colors.white24),
+            ListTile(
+              leading: const Icon(Icons.exit_to_app, color: Colors.redAccent),
+              title: const Text('Disconnect', style: TextStyle(color: Colors.redAccent)),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.pop(context); // Go back to connect screen
+              },
+            ),
             ListTile(
               leading: Icon(_connected ? Icons.cloud_done : Icons.cloud_off, color: _connected ? const Color(0xFF1DB954) : Colors.red),
               title: Text('Status: $_status', style: const TextStyle(color: Colors.white)),

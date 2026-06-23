@@ -33,6 +33,13 @@ try:
 except ImportError:
     HAS_PILLOW = False
 
+try:
+    import mss
+    import mss.tools
+    HAS_MSS = True
+except ImportError:
+    HAS_MSS = False
+
 # ─── Optional screen mirror imports ──────────────────────────────────────────
 try:
     import websockets
@@ -414,13 +421,21 @@ class WindowsInputInjector(InputInjector):
 
     def inject(self, evt: DrawEvent, region: Optional[dict] = None):
         px, py = evt.to_screen(self.width, self.height, region)
-        self.user32.SetCursorPos(px, py)
+        
+        # Use MOUSEEVENTF_ABSOLUTE for precise mapping to the virtual desktop, avoiding DPI/acceleration issues
+        nx = int((px / max(1, self.width)) * 65535)
+        ny = int((py / max(1, self.height)) * 65535)
+        
+        flags = self.MOUSEEVENTF_ABSOLUTE | self.MOUSEEVENTF_MOVE
+        
         if evt.type == 'down':
             self._pen_down = True
-            self.user32.mouse_event(self.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            flags |= self.MOUSEEVENTF_LEFTDOWN
         elif evt.type == 'up':
             self._pen_down = False
-            self.user32.mouse_event(self.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            flags |= self.MOUSEEVENTF_LEFTUP
+
+        self.user32.mouse_event(flags, nx, ny, 0, 0)
 
 
 class MacOSInputInjector(InputInjector):
@@ -848,6 +863,11 @@ class DrawTabServer:
                         self._handle_key_command(data.get('keys', []))
                     elif data.get('cmd') == 'get_region_preview':
                         await self._handle_get_region_preview(ws, data.get('region'))
+                    elif data.get('cmd') == 'set_mirror_mode':
+                        enabled = bool(data.get('enabled', False))
+                        self.enable_mirror = enabled
+                        if enabled and not hasattr(self, '_mirror_task'):
+                            self._mirror_task = asyncio.create_task(self._mirror_loop())
                 except json.JSONDecodeError:
                     log.warning("Invalid JSON received")
                 except Exception as e:
@@ -994,6 +1014,71 @@ class DrawTabServer:
             return None
         return data
 
+    async def _mirror_loop(self):
+        if not HAS_MSS:
+            log.warning("mss not installed, low-latency mirroring unavailable.")
+            return
+
+        with mss.mss() as sct:
+            while self.enable_mirror and self.clients:
+                try:
+                    primary_mon = sct.monitors[1]  # Primary monitor (physical pixels)
+                    # Calculate display scaling factor (physical / logical)
+                    scale_x = primary_mon['width'] / max(1, self.width)
+                    scale_y = primary_mon['height'] / max(1, self.height)
+
+                    region = self.selected_region if self.region_mode_enabled and self.selected_region else None
+                    if region:
+                        monitor = {
+                            "top": int(region.get('top', 0) * scale_y) + primary_mon['top'],
+                            "left": int(region.get('left', 0) * scale_x) + primary_mon['left'],
+                            "width": int(region.get('width', self.width) * scale_x),
+                            "height": int(region.get('height', self.height) * scale_y),
+                        }
+                    else:
+                        monitor = primary_mon
+                    
+                    # Capture screen
+                    sct_img = sct.grab(monitor)
+                    
+                    # Convert to JPEG using Pillow
+                    if HAS_PILLOW:
+                        from PIL import Image
+                        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                        
+                        # Downscale to reduce latency and bandwidth if it's large
+                        MAX_DIM = 1280
+                        if img.width > MAX_DIM or img.height > MAX_DIM:
+                            img.thumbnail((MAX_DIM, MAX_DIM), Image.Resampling.BILINEAR)
+                        
+                        # Compress with lower quality for maximum speed
+                        buf = io.BytesIO()
+                        img.save(buf, format="JPEG", quality=40, optimize=False)
+                        img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        
+                        payload = json.dumps({
+                            'cmd': 'mirror_frame',
+                            'image_b64': img_b64
+                        })
+                        
+                        # Broadcast to all clients
+                        dead_clients = set()
+                        for ws in list(self.clients):
+                            try:
+                                await ws.send(payload)
+                            except Exception:
+                                dead_clients.add(ws)
+                        for ws in dead_clients:
+                            self.clients.discard(ws)
+                            
+                    await asyncio.sleep(1/30)  # ~30 FPS limit
+                except Exception as e:
+                    log.error(f"Mirror loop error: {e}")
+                    await asyncio.sleep(1)
+        
+        if hasattr(self, '_mirror_task'):
+            delattr(self, '_mirror_task')
+
     async def start(self):
         self._loop = asyncio.get_running_loop()
         self.injector = create_injector(self.width, self.height)
@@ -1001,6 +1086,8 @@ class DrawTabServer:
         log.info(f"Build: {BUILD_TAG}")
         log.info(f"DrawTab server starting on ws://{self.host}:{self.port}")
         log.info(f"Input injection ready ({platform.system()})")
+        if HAS_MSS:
+            log.info("mss found: High-performance mirroring ready.")
 
         # Print connection instructions
         import socket
