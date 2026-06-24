@@ -143,6 +143,59 @@ INTERPOLATION_MAX_PIXEL_STEP = 2
 INTERPOLATION_MIN_TIME_MS = 2
 
 
+def run_preset_chooser_app() -> Optional[str]:
+    try:
+        import tkinter as tk
+    except ImportError:
+        return 'mobile'
+        
+    chosen = None
+    root = tk.Tk()
+    root.title('Select Region Preset')
+    root.attributes('-topmost', True)
+    
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    width = 300
+    height = 350
+    x = max(0, (screen_w - width) // 2)
+    y = max(0, (screen_h - height) // 2)
+    root.geometry(f'{width}x{height}+{x}+{y}')
+    root.resizable(False, False)
+    
+    frame = tk.Frame(root, bg='#111827', highlightbackground='#6C63FF', highlightthickness=3)
+    frame.pack(fill='both', expand=True)
+
+    header = tk.Frame(frame, bg='#6C63FF', height=40)
+    header.pack(fill='x', side='top')
+    header.pack_propagate(False)
+
+    title = tk.Label(header, text='Choose Region Mode Preset', fg='white', bg='#6C63FF', font=('Segoe UI', 11, 'bold'))
+    title.pack(expand=True)
+    
+    def on_choose(preset):
+        nonlocal chosen
+        chosen = preset
+        root.destroy()
+        
+    def btn(text, preset):
+        b = tk.Button(frame, text=text, font=('Segoe UI', 12), bg='#374151', fg='white', 
+                      activebackground='#6C63FF', activeforeground='white', relief='flat',
+                      command=lambda p=preset: on_choose(p))
+        b.pack(fill='x', padx=20, pady=10)
+        
+    btn('📱 Mobile', 'mobile')
+    btn('💻 Tablet', 'tablet')
+    btn('✍️ Signature', 'signature')
+    btn('📏 Custom', 'custom')
+    
+    tk.Button(frame, text='Cancel', font=('Segoe UI', 10), bg='#111827', fg='#9CA3AF', 
+              activebackground='#111827', activeforeground='white', relief='flat',
+              command=root.destroy).pack(pady=10)
+              
+    root.mainloop()
+    return chosen
+
 def run_region_selector_app(preset: str = 'mobile') -> Optional[dict]:
     try:
         import tkinter as tk
@@ -852,7 +905,7 @@ class DrawTabServer:
                         self.region_mode_enabled = bool(data.get('enabled', False))
                         await self._broadcast_region_state()
                     elif data.get('cmd') == 'select_region':
-                        preset = data.get('preset', 'mobile')
+                        preset = data.get('preset')
                         await self._select_region_from_overlay(preset)
                         await self._broadcast_region_state()
                     elif data.get('cmd') == 'adjust_region':
@@ -872,8 +925,29 @@ class DrawTabServer:
                             new_w = min(new_w, self.width)
                             new_h = min(new_h, self.height)
                             
-                            cx -= dx * new_w
-                            cy -= dy * new_h
+                            if 'dx_pixels' in data and 'dy_pixels' in data:
+                                dx_pixels = data['dx_pixels']
+                                dy_pixels = data['dy_pixels']
+                                sw = max(1.0, float(data.get('sourceWidth', 1920)))
+                                sh = max(1.0, float(data.get('sourceHeight', 1080)))
+                                scale_x = new_w / sw
+                                scale_y = new_h / sh
+                                
+                                # If mirroring is on, pan like a touchscreen (inverted).
+                                # If mirroring is off, pan like a trackpad.
+                                if self.enable_mirror:
+                                    cx -= dx_pixels * scale_x
+                                    cy -= dy_pixels * scale_y
+                                else:
+                                    cx += dx_pixels * scale_x
+                                    cy += dy_pixels * scale_y
+                            else:
+                                if self.enable_mirror:
+                                    cx -= dx * new_w
+                                    cy -= dy * new_h
+                                else:
+                                    cx += dx * new_w
+                                    cy += dy * new_h
                             
                             new_left = cx - new_w / 2
                             new_top = cy - new_h / 2
@@ -889,10 +963,10 @@ class DrawTabServer:
                                 new_top = self.height - new_h
                                 
                             self.selected_region = {
-                                'left': int(new_left),
-                                'top': int(new_top),
-                                'width': int(new_w),
-                                'height': int(new_h)
+                                'left': new_left,
+                                'top': new_top,
+                                'width': new_w,
+                                'height': new_h
                             }
                             await self._broadcast_region_state()
                     elif data.get('cmd') == 'key':
@@ -1016,11 +1090,12 @@ class DrawTabServer:
         for ws in dead_clients:
             self.clients.discard(ws)
 
-    async def _select_region_from_overlay(self, preset: str = 'mobile'):
+    async def _select_region_from_overlay(self, preset: Optional[str] = None):
         async with self._region_selection_lock:
             region = await asyncio.to_thread(self._select_region_blocking, preset)
             if region:
                 self.selected_region = region
+                self.region_mode_enabled = True
                 log.info(
                     "Region selected: left=%d top=%d width=%d height=%d",
                     region['left'], region['top'], region['width'], region['height']
@@ -1028,7 +1103,11 @@ class DrawTabServer:
             else:
                 log.info("Region selection cancelled")
 
-    def _select_region_blocking(self, preset: str) -> Optional[dict]:
+    def _select_region_blocking(self, preset: Optional[str] = None) -> Optional[dict]:
+        if not preset:
+            preset = run_preset_chooser_app()
+        if not preset:
+            return None
         cmd = [sys.executable, os.path.abspath(__file__), '--select-region', preset]
         try:
             completed = subprocess.run(cmd, capture_output=True, text=True, check=False)

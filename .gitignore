@@ -39,3 +39,5 @@ desktop_python/dist/
 # OS / misc
 .DS_Store
 *.log
+
+*future_updates.txt

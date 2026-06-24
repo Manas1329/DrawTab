@@ -51,7 +51,6 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
           .map((e) => CustomShortcut.fromJson(jsonDecode(e)))
           .toList();
       
-      // Default shortcuts if empty
       if (_shortcuts.isEmpty) {
         _shortcuts = [
           CustomShortcut(label: 'Undo', keys: ['ctrl', 'z']),
@@ -86,15 +85,10 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
     if (_ctrlActive) keysToSend.add('ctrl');
     if (_shiftActive) keysToSend.add('shift');
     if (_altActive) keysToSend.add('alt');
-    if (_winActive) keysToSend.add('cmd'); // mapping win to cmd internally if needed
+    if (_winActive) keysToSend.add('cmd'); 
 
     keysToSend.add(key);
-
     _sendKeyCommand(keysToSend);
-
-    // Reset modifiers after sending if it was a character key? 
-    // Usually modifiers are sticky until tapped again or used once.
-    // Let's make them sticky (toggle).
   }
 
   void _addShortcutDialog() {
@@ -103,20 +97,21 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
     showDialog(
       context: context,
       builder: (context) {
+        final theme = Theme.of(context);
         return AlertDialog(
-          backgroundColor: const Color(0xFF1A1A2E),
-          title: const Text('Add Shortcut', style: TextStyle(color: Colors.white)),
+          backgroundColor: theme.colorScheme.surface,
+          title: Text('Add Shortcut', style: TextStyle(color: theme.textTheme.bodyLarge?.color)),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Label (e.g. Undo)', labelStyle: TextStyle(color: Colors.white70)),
+                style: TextStyle(color: theme.textTheme.bodyLarge?.color),
+                decoration: const InputDecoration(labelText: 'Label (e.g. Undo)'),
                 onChanged: (val) => label = val,
               ),
               TextField(
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(labelText: 'Keys (comma separated, e.g. ctrl,z)', labelStyle: TextStyle(color: Colors.white70)),
+                style: TextStyle(color: theme.textTheme.bodyLarge?.color),
+                decoration: const InputDecoration(labelText: 'Keys (comma separated, e.g. ctrl,z)'),
                 onChanged: (val) => keysInput = val,
               ),
             ],
@@ -147,8 +142,12 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final bgColor = theme.scaffoldBackgroundColor.withOpacity(0.95);
+    final dividerColor = theme.dividerColor;
+
     return Container(
-      color: const Color(0xFF0F0F1A),
+      color: bgColor,
       child: Row(
         children: [
           // Left side: Keyboard
@@ -157,7 +156,7 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
             child: Container(
               padding: const EdgeInsets.all(8.0),
               decoration: BoxDecoration(
-                border: Border(right: BorderSide(color: Colors.white.withOpacity(0.1))),
+                border: Border(right: BorderSide(color: dividerColor)),
               ),
               child: _buildKeyboard(),
             ),
@@ -173,12 +172,12 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text(
+                      Text(
                         'Custom Shortcuts',
-                        style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                        style: TextStyle(color: theme.textTheme.bodyLarge?.color, fontSize: 18, fontWeight: FontWeight.bold),
                       ),
                       IconButton(
-                        icon: const Icon(Icons.add, color: Color(0xFF6C63FF)),
+                        icon: Icon(Icons.add, color: theme.colorScheme.primary),
                         onPressed: _addShortcutDialog,
                       ),
                     ],
@@ -194,8 +193,7 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
                       ),
                       itemCount: _shortcuts.length,
                       itemBuilder: (context, index) {
-                        final sc = _shortcuts[index];
-                        return _buildShortcutButton(sc, index);
+                        return _buildShortcutButton(context, _shortcuts[index], index);
                       },
                     ),
                   ),
@@ -208,11 +206,13 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
     );
   }
 
-  Widget _buildShortcutButton(CustomShortcut shortcut, int index) {
+  Widget _buildShortcutButton(BuildContext context, CustomShortcut shortcut, int index) {
+    final theme = Theme.of(context);
+    final primary = theme.colorScheme.primary;
+    
     return InkWell(
       onTap: () => _sendKeyCommand(shortcut.keys),
       onLongPress: () {
-        // Delete shortcut
         setState(() {
           _shortcuts.removeAt(index);
           _saveShortcuts();
@@ -220,14 +220,14 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
       },
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF6C63FF).withOpacity(0.2),
+          color: primary.withOpacity(0.15),
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFF6C63FF).withOpacity(0.5)),
+          border: Border.all(color: primary.withOpacity(0.4)),
         ),
         alignment: Alignment.center,
         child: Text(
           shortcut.label,
-          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+          style: TextStyle(color: theme.textTheme.bodyLarge?.color, fontWeight: FontWeight.w600),
         ),
       ),
     );
@@ -239,13 +239,10 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
         return SingleChildScrollView(
           child: Column(
             children: [
-              // F-keys
               _buildKeyRow(['f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12']),
               const SizedBox(height: 6),
-              // Number row
               _buildKeyRow(['`', '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', 'backspace']),
               const SizedBox(height: 6),
-              // QWERTY
               _buildKeyRow(['tab', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\\']),
               const SizedBox(height: 6),
               _buildKeyRow(['capslock', 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', 'enter']),
@@ -287,7 +284,16 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
     if (key == 'alt') isActive = _altActive;
     if (key == 'win') isActive = _winActive;
 
-    Color bgColor = isActive ? const Color(0xFF6C63FF) : const Color(0xFF2A2A3E);
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    
+    Color activeBg = theme.colorScheme.primary;
+    Color inactiveBg = isDark ? const Color(0xFF2A2A3E) : Colors.grey.shade300;
+    Color bgColor = isActive ? activeBg : inactiveBg;
+    
+    Color activeText = Colors.white;
+    Color inactiveText = isDark ? Colors.white70 : Colors.black87;
+    Color textColor = isActive ? activeText : inactiveText;
     
     return InkWell(
       onTap: () {
@@ -307,13 +313,13 @@ class _InputPanelScreenState extends State<InputPanelScreen> {
         decoration: BoxDecoration(
           color: bgColor,
           borderRadius: BorderRadius.circular(4),
-          border: Border.all(color: Colors.white.withOpacity(0.1)),
+          border: Border.all(color: theme.dividerColor.withOpacity(0.2)),
         ),
         alignment: Alignment.center,
         child: Text(
           key.toUpperCase(),
           style: TextStyle(
-            color: isActive ? Colors.white : Colors.white70, 
+            color: textColor, 
             fontSize: key.length > 1 ? 12 : 16,
             fontWeight: isModifier ? FontWeight.bold : FontWeight.normal
           ),
