@@ -302,6 +302,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
   double _tiltSensitivity = 1.0;
 
   bool _regionModeEnabled = false;
+  bool _regionLocked = false;
   Map<String, dynamic>? _serverRegion;
 
   bool _mirrorEnabled = false;
@@ -478,7 +479,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
     final isPen = e.kind == PointerDeviceKind.stylus || e.kind == PointerDeviceKind.invertedStylus;
     int buttons = 1;
-    if (_eraserMode || e.kind == PointerDeviceKind.invertedStylus) buttons = 32;
+    if (e.kind == PointerDeviceKind.invertedStylus) buttons = 32;
 
     return DrawEvent(
       type: type,
@@ -603,7 +604,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                 _lastGestureScale = 1.0;
               },
               onScaleUpdate: (details) {
-                if (_regionModeEnabled && details.pointerCount >= 2 && _canvasSize != null) {
+                if (_regionModeEnabled && !_regionLocked && details.pointerCount >= 2 && _canvasSize != null) {
                   final scaleDelta = details.scale / _lastGestureScale;
                   _lastGestureScale = details.scale;
                   
@@ -725,6 +726,12 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                   _regionModeEnabled ? theme.colorScheme.primary : null
                                 ),
                                 _buildNavIcon(
+                                  _regionLocked ? Icons.lock : Icons.lock_open,
+                                  'Region Lock',
+                                  () => setState(() => _regionLocked = !_regionLocked),
+                                  _regionLocked ? Colors.redAccent : theme.colorScheme.primary
+                                ),
+                                _buildNavIcon(
                                   _mirrorEnabled ? Icons.cast_connected : Icons.cast,
                                   'Screen Mirror',
                                   () {
@@ -772,6 +779,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                   Icons.undo,
                                   'Undo',
                                   () => _sendCommand({'cmd': 'key', 'keys': ['ctrl', 'z']}),
+                                  theme.colorScheme.primary
                                 ),
                               ],
                             ),
@@ -788,6 +796,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                 Icons.undo,
                                 'Undo',
                                 () => _sendCommand({'cmd': 'key', 'keys': ['ctrl', 'z']}),
+                                theme.colorScheme.primary
                               ),
                             ),
                           ),
@@ -809,7 +818,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                   leftOffset = position.dx;
                 }
                 return Positioned(
-                  top: 70, 
+                  top: 90, 
                   left: leftOffset, 
                   child: Material(
                     color: Colors.transparent,
