@@ -143,264 +143,6 @@ INTERPOLATION_MAX_PIXEL_STEP = 2
 INTERPOLATION_MIN_TIME_MS = 2
 
 
-def run_preset_chooser_app() -> Optional[str]:
-    try:
-        import tkinter as tk
-    except ImportError:
-        return 'mobile'
-        
-    chosen = None
-    root = tk.Tk()
-    root.title('Select Region Preset')
-    root.attributes('-topmost', True)
-    
-    screen_w = root.winfo_screenwidth()
-    screen_h = root.winfo_screenheight()
-    width = 300
-    height = 350
-    x = max(0, (screen_w - width) // 2)
-    y = max(0, (screen_h - height) // 2)
-    root.geometry(f'{width}x{height}+{x}+{y}')
-    root.resizable(False, False)
-    
-    frame = tk.Frame(root, bg='#111827', highlightbackground='#6C63FF', highlightthickness=3)
-    frame.pack(fill='both', expand=True)
-
-    header = tk.Frame(frame, bg='#6C63FF', height=40)
-    header.pack(fill='x', side='top')
-    header.pack_propagate(False)
-
-    title = tk.Label(header, text='Choose Region Mode Preset', fg='white', bg='#6C63FF', font=('Segoe UI', 11, 'bold'))
-    title.pack(expand=True)
-    
-    def on_choose(preset):
-        nonlocal chosen
-        chosen = preset
-        root.destroy()
-        
-    def btn(text, preset):
-        b = tk.Button(frame, text=text, font=('Segoe UI', 12), bg='#374151', fg='white', 
-                      activebackground='#6C63FF', activeforeground='white', relief='flat',
-                      command=lambda p=preset: on_choose(p))
-        b.pack(fill='x', padx=20, pady=10)
-        
-    btn('📱 Mobile', 'mobile')
-    btn('💻 Tablet', 'tablet')
-    btn('✍️ Signature', 'signature')
-    btn('📏 Custom', 'custom')
-    
-    tk.Button(frame, text='Cancel', font=('Segoe UI', 10), bg='#111827', fg='#9CA3AF', 
-              activebackground='#111827', activeforeground='white', relief='flat',
-              command=root.destroy).pack(pady=10)
-              
-    root.mainloop()
-    return chosen
-
-def run_region_selector_app(preset: str = 'mobile') -> Optional[dict]:
-    try:
-        import tkinter as tk
-    except ImportError:
-        log.error("tkinter is required for region selection")
-        return None
-
-    selected: dict[str, int] = {}
-    done = False
-
-    root = tk.Tk()
-    root.title(f'DrawTab Region Selector - {preset.capitalize()}')
-    root.attributes('-topmost', True)
-    try:
-        root.attributes('-alpha', 1.0)
-    except Exception:
-        pass
-    root.deiconify()
-    root.update_idletasks()
-    root.lift()
-    root.focus_force()
-
-    screen_w = root.winfo_screenwidth()
-    screen_h = root.winfo_screenheight()
-    max_width = screen_w
-    max_height = screen_h
-
-    # Presets definition
-    presets = {
-        'mobile': {'landscape': (640, 360), 'portrait': (360, 640), 'min_landscape': (480, 320), 'min_portrait': (320, 480)},
-        'tablet': {'landscape': (1024, 768), 'portrait': (768, 1024), 'min_landscape': (800, 600), 'min_portrait': (600, 800)},
-        'signature': {'landscape': (500, 250), 'portrait': (300, 400), 'min_landscape': (300, 150), 'min_portrait': (200, 250)},
-        'custom': {'landscape': (800, 600), 'portrait': (600, 800), 'min_landscape': (100, 100), 'min_portrait': (100, 100)},
-    }
-    
-    if preset not in presets:
-        preset = 'mobile'
-
-    def orientation_profile(mode: str) -> tuple[tuple[int, int], tuple[int, int]]:
-        p = presets[preset]
-        if mode == 'landscape':
-            return p['landscape'], p['min_landscape']
-        return p['portrait'], p['min_portrait']
-
-    base_size, min_size = orientation_profile('portrait' if preset != 'signature' else 'landscape')
-    scale = min(screen_w / base_size[0], screen_h / base_size[1], 1.0)
-    width = max(min_size[0], int(base_size[0] * scale))
-    height = max(min_size[1], int(base_size[1] * scale))
-    width = min(width, max_width)
-    height = min(height, max_height)
-
-    x = max(0, (screen_w - width) // 2)
-    y = max(0, (screen_h - height) // 2)
-    root.geometry(f'{width}x{height}+{x}+{y}')
-    root.minsize(min_size[0], min_size[1])
-    root.maxsize(max_width, max_height)
-    root.resizable(True, True)
-    orientation = 'portrait' if height >= width else 'landscape'
-    orientation_var = tk.StringVar(value=orientation)
-
-    frame = tk.Frame(root, bg='#111827', highlightbackground='#6C63FF', highlightthickness=3)
-    frame.pack(fill='both', expand=True)
-
-    header = tk.Frame(frame, bg='#6C63FF', height=40)
-    header.pack(fill='x', side='top')
-    header.pack_propagate(False)
-
-    title = tk.Label(
-        header,
-        text=f'DrawTab Region Selector ({preset.capitalize()})',
-        fg='white',
-        bg='#6C63FF',
-        font=('Segoe UI', 11, 'bold')
-    )
-    title.pack(side='left', padx=12)
-
-    hint = tk.Label(
-        frame,
-        text='Move and resize this window with the mouse. Use Portrait/Landscape to switch size. Press Enter to confirm or Esc to cancel.',
-        fg='white',
-        bg='#111827',
-        justify='left',
-        anchor='w',
-        wraplength=max(220, width - 24),
-        font=('Segoe UI', 11)
-    )
-    hint.pack(fill='x', padx=12, pady=(10, 6))
-
-    control_bar = tk.Frame(frame, bg='#111827')
-    control_bar.pack(fill='x', padx=12, pady=(0, 8))
-
-    orientation_label = tk.Label(
-        control_bar,
-        text='Orientation:',
-        fg='white',
-        bg='#111827',
-        font=('Segoe UI', 10, 'bold')
-    )
-    orientation_label.pack(side='left', padx=(0, 8))
-
-    def apply_orientation(next_orientation: str):
-        nonlocal orientation
-        orientation = next_orientation
-        orientation_var.set(next_orientation)
-        base_size, next_min_size = orientation_profile(next_orientation)
-        scale = min(screen_w / base_size[0], screen_h / base_size[1], 1.0)
-        next_width = max(next_min_size[0], int(base_size[0] * scale))
-        next_height = max(next_min_size[1], int(base_size[1] * scale))
-        next_width = min(next_width, max_width)
-        next_height = min(next_height, max_height)
-        next_x = max(0, (screen_w - next_width) // 2)
-        next_y = max(0, (screen_h - next_height) // 2)
-        root.geometry(f'{next_width}x{next_height}+{next_x}+{next_y}')
-        root.minsize(next_min_size[0], next_min_size[1])
-        root.maxsize(max_width, max_height)
-        hint.configure(wraplength=max(220, next_width - 24))
-        sync_orientation_buttons()
-
-    portrait_btn = tk.Button(
-        control_bar,
-        text='Portrait',
-        command=lambda: apply_orientation('portrait'),
-        relief='flat',
-        bg='#374151',
-        fg='white',
-        activebackground='#6C63FF',
-        activeforeground='white',
-        padx=10,
-        pady=4,
-    )
-    portrait_btn.pack(side='left', padx=(0, 8))
-
-    landscape_btn = tk.Button(
-        control_bar,
-        text='Landscape',
-        command=lambda: apply_orientation('landscape'),
-        relief='flat',
-        bg='#374151',
-        fg='white',
-        activebackground='#6C63FF',
-        activeforeground='white',
-        padx=10,
-        pady=4,
-    )
-    landscape_btn.pack(side='left')
-
-    def sync_orientation_buttons():
-        active_bg = '#6C63FF'
-        inactive_bg = '#374151'
-        portrait_btn.configure(bg=active_bg if orientation_var.get() == 'portrait' else inactive_bg)
-        landscape_btn.configure(bg=active_bg if orientation_var.get() == 'landscape' else inactive_bg)
-
-    def on_resize(_event=None):
-        current_width = root.winfo_width()
-        hint.configure(wraplength=max(220, current_width - 24))
-
-    root.bind('<Configure>', on_resize)
-    sync_orientation_buttons()
-
-    def finish(region: Optional[dict] = None):
-        nonlocal done
-        if done:
-            return
-        done = True
-        if region:
-            selected.update(region)
-        try:
-            root.destroy()
-        except Exception:
-            pass
-
-    def capture_region():
-        root.update_idletasks()
-        left = int(root.winfo_rootx())
-        top = int(root.winfo_rooty())
-        r_width = int(root.winfo_width())
-        r_height = int(root.winfo_height())
-        _, min_size = orientation_profile(orientation)
-        r_width = max(min_size[0], min(max_width, r_width))
-        r_height = max(min_size[1], min(max_height, r_height))
-        left = max(0, min(screen_w - r_width, left))
-        top = max(0, min(screen_h - r_height, top))
-        return {
-            'left': left,
-            'top': top,
-            'width': r_width,
-            'height': r_height,
-        }
-
-    def on_confirm(_event=None):
-        finish(capture_region())
-
-    def on_cancel(_event=None):
-        finish(None)
-
-    root.bind('<Return>', on_confirm)
-    root.bind('<KP_Enter>', on_confirm)
-    root.bind('<Escape>', on_cancel)
-    root.protocol('WM_DELETE_WINDOW', on_cancel)
-
-    root.mainloop()
-    return selected or None
-
-# ─── PLATFORM INPUT INJECTORS ─────────────────────────────────────────────────
-
 class InputInjector:
     """Base class for platform-specific input injection."""
     def __init__(self, width: int, height: int):
@@ -625,6 +367,9 @@ def create_injector(width: int, height: int) -> InputInjector:
 
 # ─── WEBSOCKET SERVER ─────────────────────────────────────────────────────────
 
+
+# ─── WEBSOCKET SERVER (ASYNCIO ENGINE) ───────────────────────────────────────
+
 class DrawTabServer:
     def __init__(self, host: str, port: int, width: int, height: int,
                  enable_mirror: bool = False):
@@ -635,32 +380,40 @@ class DrawTabServer:
         self.enable_mirror = enable_mirror
         self.injector: Optional[InputInjector] = None
         self.clients: set = set()
+        
+        # State
         self.region_mode_enabled = False
+        self.region_locked = False
         self.selected_region: Optional[dict] = None
-        self._region_selection_lock = asyncio.Lock()
+        self.active_monitor_index = 0
+        
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._hotkey_listener = None
         self.keyboard_controller = pynput_keyboard.Controller() if HAS_PYNPUT else None
 
-        # Latency stats
         self._evt_count = 0
         self._last_report = time.time()
         self._max_lag_ms = 0.0
-        self._debug_logged_events = 0
-        # Track last injected screen point for interpolation smoothing
         self._last_injected: Optional[dict] = None
-        self._stroke_points = []
 
-    def quadratic_bezier(self, p0, p1, p2, t):
-        x = ((1 - t) ** 2) * p0[0] + \
-            2 * (1 - t) * t * p1[0] + \
-            (t ** 2) * p2[0]
-
-        y = ((1 - t) ** 2) * p0[1] + \
-            2 * (1 - t) * t * p1[1] + \
-            (t ** 2) * p2[1]
-
-        return int(x), int(y)
+    def broadcast_region_state(self):
+        if not self._loop:
+            return
+        payload = json.dumps({
+            'cmd': 'region_state',
+            'regionModeEnabled': self.region_mode_enabled,
+            'regionLocked': self.region_locked,
+            'region': self.selected_region
+        })
+        async def _send():
+            dead_clients = set()
+            for ws in list(self.clients):
+                try:
+                    await ws.send(payload)
+                except Exception:
+                    dead_clients.add(ws)
+            for ws in dead_clients:
+                self.clients.discard(ws)
+        asyncio.run_coroutine_threadsafe(_send(), self._loop)
 
     def _process_batch(self, batch: list):
         now_us = time.monotonic_ns() // 1000
@@ -681,167 +434,46 @@ class DrawTabServer:
                 ts=raw.get('ts', 0),
             )
 
-            if self._debug_logged_events < 8:
-                sx, sy = evt.to_screen(self.width, self.height, active_region)
-                log.info(
-                    "DBG evt=%s raw=(%.4f, %.4f) normalized=%s src=(%.2f, %.2f) mapped=(%d, %d)",
-                    evt.type,
-                    evt.x,
-                    evt.y,
-                    evt.normalized,
-                    evt.sourceWidth,
-                    evt.sourceHeight,
-                    sx,
-                    sy,
-                )
-                self._debug_logged_events += 1
-
-            # Calculate lag
             if evt.ts > 0:
                 lag_ms = (now_us - evt.ts) / 1000.0
                 self._max_lag_ms = max(self._max_lag_ms, lag_ms)
 
-            # Inject with smoothing interpolation to produce curved strokes
             try:
                 self._inject_with_interpolation(evt, active_region)
             except Exception as exc:
                 log.exception(f"Injection error: {exc}")
             self._evt_count += 1
 
-        # Stats every 5 seconds
         now = time.time()
         if now - self._last_report >= 5.0:
-            eps = self._evt_count / (now - self._last_report)
-            log.info(f"Throughput: {eps:.0f} events/s | Max lag: {self._max_lag_ms:.1f}ms")
+            eps = self._evt_count / max(0.001, (now - self._last_report))
+            if eps > 0:
+                log.info(f"Throughput: {eps:.0f} events/s | Max lag: {self._max_lag_ms:.1f}ms")
             self._evt_count = 0
             self._max_lag_ms = 0.0
             self._last_report = now
 
-    # def _inject_with_interpolation(self, evt: DrawEvent, region: Optional[dict]):
-    #     """Inject an event, inserting interpolated move events between the
-    #     previously injected point and this event to smooth strokes.
-    #     """
-    #     # Guard: injector must be ready
-    #     if not self.injector:
-    #         log.warning("Injector not ready, dropping event")
-    #         return
-
-    #     # Compute target screen coordinates for this event
-    #     sx, sy = evt.to_screen(self.width, self.height, region)
-
-    #     prev = self._last_injected
-    #     if evt.type == 'down':
-    #         self._stroke_points = [(sx, sy)]
-
-    #     # elif evt.type == 'move':
-    #     #     self._stroke_points.append((sx, sy))
-    #     elif evt.type == 'move':
-    #         self._stroke_points.append((sx, sy))
-
-    #         if len(self._stroke_points) > 10:
-    #             self._stroke_points.pop(0)
-
-    #     # Decide whether to interpolate: only when previous point exists and pen was down
-    #     #if isinstance(prev, dict) and prev.get('pen_down', False) and evt.type in ('move', 'up'):
-    #     if len(self._stroke_points) >= 3:
-    #         p0 = self._stroke_points[-3]
-    #         p1 = self._stroke_points[-2]
-    #         p2 = self._stroke_points[-1]
-
-    #         for i in range(1, 17):
-
-    #             t = i / 16
-
-    #             bx, by = self.quadratic_bezier(
-    #                 p0,
-    #                 p1,
-    #                 p2,
-    #                 t
-    #             )
-    #             region_left = region.get('left', 0) if region else 0
-    #             region_top = region.get('top', 0) if region else 0
-
-    #             synthetic = DrawEvent(
-    #                 type='move',
-    #                 x=bx - region_left,
-    #                 y=by - region_top,
-    #                 normalized=False,
-    #                 sourceWidth=0,
-    #                 sourceHeight=0,
-    #                 pressure=evt.pressure,
-    #                 tiltX=evt.tiltX,
-    #                 tiltY=evt.tiltY,
-    #                 isPen=evt.isPen,
-    #                 buttons=evt.buttons,
-    #                 ts=evt.ts
-    #             )
-
-    #             self.injector.inject(
-    #                 synthetic,
-    #                 region
-    #             )
-
-    #     # Finally inject the real event
-    #     self.injector.inject(evt, region)
-
-    #     # Update last injected point state
-    #     pen_down = True if evt.type in ('down', 'move') else False
-    #     if evt.type == 'up':
-    #         pen_down = False
-    #         self._stroke_points.clear()
-    #     self._last_injected = {
-    #         'x': sx,
-    #         'y': sy,
-    #         'pressure': float(evt.pressure),
-    #         'pen_down': pen_down,
-    #         'ts': evt.ts,
-    #     }
-
     def _inject_with_interpolation(self, evt: DrawEvent, region: Optional[dict]):
-        """
-        Inject event with smooth interpolation.
-        Uses the original interpolation system but generates
-        more points for smoother strokes.
-        """
-
         if not self.injector:
-            log.warning("Injector not ready, dropping event")
             return
 
         sx, sy = evt.to_screen(self.width, self.height, region)
-
         prev = self._last_injected
 
-        if (
-            isinstance(prev, dict)
-            and prev.get('pen_down', False)
-            and evt.type in ('move', 'up')
-        ):
-
+        if isinstance(prev, dict) and prev.get('pen_down', False) and evt.type in ('move', 'up'):
             px = prev['x']
             py = prev['y']
-
             dx = sx - px
             dy = sy - py
-
             distance = math.sqrt(dx * dx + dy * dy)
 
-            # Skip interpolation for tiny movements
             if distance > 2:
-
-                # More interpolation points = smoother lines
-                steps = max(
-                    1,
-                    int(distance / 1.5)
-                )
-
+                steps = max(1, int(distance / 1.5))
                 region_left = region.get('left', 0) if region else 0
                 region_top = region.get('top', 0) if region else 0
 
                 for step in range(1, steps):
-
                     t = step / steps
-
                     ix = px + dx * t
                     iy = py + dy * t
 
@@ -852,25 +484,18 @@ class DrawTabServer:
                         normalized=False,
                         sourceWidth=0,
                         sourceHeight=0,
-                        pressure=float(prev.get('pressure', evt.pressure))
-                        + (evt.pressure - float(prev.get('pressure', evt.pressure))) * t,
+                        pressure=float(prev.get('pressure', evt.pressure)) + (evt.pressure - float(prev.get('pressure', evt.pressure))) * t,
                         tiltX=evt.tiltX,
                         tiltY=evt.tiltY,
                         isPen=evt.isPen,
                         buttons=evt.buttons,
                         ts=evt.ts
                     )
+                    self.injector.inject(synthetic, region)
 
-                    self.injector.inject(
-                        synthetic,
-                        region
-                    )
-
-        # Inject actual event
         self.injector.inject(evt, region)
 
         pen_down = evt.type in ('down', 'move')
-
         self._last_injected = {
             'x': sx,
             'y': sy,
@@ -878,69 +503,83 @@ class DrawTabServer:
             'pen_down': pen_down,
             'ts': evt.ts,
         }
-
         if evt.type == 'up':
             self._last_injected['pen_down'] = False
+
+    def _handle_key_command(self, keys: list):
+        if not self.keyboard_controller:
+            return
+        vk_map = {
+            'ctrl': pynput_keyboard.Key.ctrl, 'shift': pynput_keyboard.Key.shift, 'alt': pynput_keyboard.Key.alt,
+            'win': pynput_keyboard.Key.cmd, 'cmd': pynput_keyboard.Key.cmd, 'enter': pynput_keyboard.Key.enter,
+            'backspace': pynput_keyboard.Key.backspace, 'tab': pynput_keyboard.Key.tab, 'space': pynput_keyboard.Key.space,
+            'esc': pynput_keyboard.Key.esc, 'escape': pynput_keyboard.Key.esc, 'up': pynput_keyboard.Key.up,
+            'down': pynput_keyboard.Key.down, 'left': pynput_keyboard.Key.left, 'right': pynput_keyboard.Key.right,
+            'capslock': pynput_keyboard.Key.caps_lock,
+        }
+        for i in range(1, 13): vk_map[f'f{i}'] = getattr(pynput_keyboard.Key, f'f{i}')
+
+        pressed = []
+        try:
+            for k in keys:
+                key_obj = vk_map.get(str(k).lower(), str(k).lower())
+                self.keyboard_controller.press(key_obj)
+                pressed.append(key_obj)
+            time.sleep(0.01)
+        finally:
+            for key_obj in reversed(pressed):
+                try: self.keyboard_controller.release(key_obj)
+                except Exception: pass
 
     async def handle_client(self, ws: Any):
         addr = ws.remote_address
         log.info(f"Client connected: {addr}")
         self.clients.add(ws)
-        await self._send_region_state(ws)
+        
+        # Initial state payload
+        await ws.send(json.dumps({
+            'cmd': 'region_state',
+            'regionModeEnabled': self.region_mode_enabled,
+            'regionLocked': self.region_locked,
+            'region': self.selected_region,
+        }))
 
         try:
             async for message in ws:
                 try:
                     data = json.loads(message)
+                    cmd = data.get('cmd')
+                    
                     if 'batch' in data:
                         self._process_batch(data['batch'])
                     elif 'type' in data:
-                        # Single event fallback
                         self._process_batch([data])
-                    elif data.get('cmd') == 'ping':
+                    elif cmd == 'ping':
                         await ws.send(json.dumps({'cmd': 'pong', 'ts': data.get('ts')}))
-                    elif data.get('cmd') == 'get_state':
-                        await self._send_region_state(ws)
-                    elif data.get('cmd') == 'region_mode':
-                        self.region_mode_enabled = bool(data.get('enabled', False))
-                        await self._broadcast_region_state()
-                    elif data.get('cmd') == 'select_region':
-                        preset = data.get('preset')
-                        await self._select_region_from_overlay(preset)
-                        await self._broadcast_region_state()
-                    elif data.get('cmd') == 'adjust_region':
+                    elif cmd == 'get_state':
+                        pass # Triggered implicitly or ignored in new architecture
+                    elif cmd == 'set_region_lock':
+                        self.region_locked = bool(data.get('enabled', False))
+                        if getattr(self, 'on_lock_changed_callback', None):
+                            self.on_lock_changed_callback(self.region_locked)
+                        self.broadcast_region_state()
+                    elif cmd == 'adjust_region':
                         if self.selected_region:
-                            dx = data.get('dx', 0)
-                            dy = data.get('dy', 0)
-                            scale = data.get('scale', 1.0)
-                            
-                            cw = self.selected_region['width']
-                            ch = self.selected_region['height']
-                            cx = self.selected_region['left'] + cw / 2
-                            cy = self.selected_region['top'] + ch / 2
-                            
-                            new_w = cw / scale
-                            new_h = ch / scale
-                            
-                            new_w = min(new_w, self.width)
-                            new_h = min(new_h, self.height)
+                            dx, dy, scale = data.get('dx', 0), data.get('dy', 0), data.get('scale', 1.0)
+                            cw, ch = self.selected_region['width'], self.selected_region['height']
+                            cx, cy = self.selected_region['left'] + cw/2, self.selected_region['top'] + ch/2
+                            new_w, new_h = cw / scale, ch / scale
+                            new_w, new_h = min(new_w, self.width), min(new_h, self.height)
                             
                             if 'dx_pixels' in data and 'dy_pixels' in data:
-                                dx_pixels = data['dx_pixels']
-                                dy_pixels = data['dy_pixels']
-                                sw = max(1.0, float(data.get('sourceWidth', 1920)))
-                                sh = max(1.0, float(data.get('sourceHeight', 1080)))
-                                scale_x = new_w / sw
-                                scale_y = new_h / sh
-                                
-                                # If mirroring is on, pan like a touchscreen (inverted).
-                                # If mirroring is off, pan like a trackpad.
+                                sw, sh = max(1.0, float(data.get('sourceWidth', 1920))), max(1.0, float(data.get('sourceHeight', 1080)))
+                                sx, sy = new_w / sw, new_h / sh
                                 if self.enable_mirror:
-                                    cx -= dx_pixels * scale_x
-                                    cy -= dy_pixels * scale_y
+                                    cx -= data['dx_pixels'] * sx
+                                    cy -= data['dy_pixels'] * sy
                                 else:
-                                    cx += dx_pixels * scale_x
-                                    cy += dy_pixels * scale_y
+                                    cx += data['dx_pixels'] * sx
+                                    cy += data['dy_pixels'] * sy
                             else:
                                 if self.enable_mirror:
                                     cx -= dx * new_w
@@ -948,38 +587,14 @@ class DrawTabServer:
                                 else:
                                     cx += dx * new_w
                                     cy += dy * new_h
+                                    
+                            new_left = max(0, min(self.width - new_w, cx - new_w / 2))
+                            new_top = max(0, min(self.height - new_h, cy - new_h / 2))
                             
-                            new_left = cx - new_w / 2
-                            new_top = cy - new_h / 2
-                            
-                            if new_left < 0:
-                                new_left = 0
-                            if new_left + new_w > self.width:
-                                new_left = self.width - new_w
-                                
-                            if new_top < 0:
-                                new_top = 0
-                            if new_top + new_h > self.height:
-                                new_top = self.height - new_h
-                                
-                            self.selected_region = {
-                                'left': new_left,
-                                'top': new_top,
-                                'width': new_w,
-                                'height': new_h
-                            }
-                            await self._broadcast_region_state()
-                    elif data.get('cmd') == 'key':
+                            self.selected_region = {'left': new_left, 'top': new_top, 'width': new_w, 'height': new_h}
+                            self.broadcast_region_state()
+                    elif cmd == 'key':
                         self._handle_key_command(data.get('keys', []))
-                    elif data.get('cmd') == 'get_region_preview':
-                        await self._handle_get_region_preview(ws, data.get('region'))
-                    elif data.get('cmd') == 'set_mirror_mode':
-                        enabled = bool(data.get('enabled', False))
-                        self.enable_mirror = enabled
-                        if enabled and not hasattr(self, '_mirror_task'):
-                            self._mirror_task = asyncio.create_task(self._mirror_loop())
-                except json.JSONDecodeError:
-                    log.warning("Invalid JSON received")
                 except Exception as e:
                     log.error(f"Event processing error: {e}")
         except Exception:
@@ -988,162 +603,18 @@ class DrawTabServer:
             self.clients.discard(ws)
             log.info(f"Client disconnected: {addr}")
 
-    async def _handle_get_region_preview(self, ws: Any, region: dict):
-        if not HAS_PILLOW:
-            log.warning("Pillow not installed, cannot generate preview.")
-            return
-        if not region:
-            return
-        try:
-            x, y = int(region.get('x', 0)), int(region.get('y', 0))
-            w, h = int(region.get('width', 0)), int(region.get('height', 0))
-            if w <= 0 or h <= 0:
-                return
-
-            def _grab():
-                return ImageGrab.grab(bbox=(x, y, x + w, y + h))
-
-            img = await self._loop.run_in_executor(None, _grab)
-            
-            max_dim = 800
-            if img.width > max_dim or img.height > max_dim:
-                img.thumbnail((max_dim, max_dim))
-            
-            buf = io.BytesIO()
-            img.save(buf, format='JPEG', quality=70)
-            b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-            
-            await ws.send(json.dumps({
-                'cmd': 'region_preview',
-                'image_b64': b64
-            }))
-        except Exception as e:
-            log.error(f"Error generating preview: {e}")
-
-    def _handle_key_command(self, keys: list):
-        if not self.keyboard_controller:
-            log.warning("Keyboard injection requested but pynput not available")
-            return
-            
-        vk_map = {
-            'ctrl': pynput_keyboard.Key.ctrl,
-            'shift': pynput_keyboard.Key.shift,
-            'alt': pynput_keyboard.Key.alt,
-            'win': pynput_keyboard.Key.cmd,
-            'cmd': pynput_keyboard.Key.cmd,
-            'enter': pynput_keyboard.Key.enter,
-            'backspace': pynput_keyboard.Key.backspace,
-            'tab': pynput_keyboard.Key.tab,
-            'space': pynput_keyboard.Key.space,
-            'esc': pynput_keyboard.Key.esc,
-            'escape': pynput_keyboard.Key.esc,
-            'up': pynput_keyboard.Key.up,
-            'down': pynput_keyboard.Key.down,
-            'left': pynput_keyboard.Key.left,
-            'right': pynput_keyboard.Key.right,
-            'capslock': pynput_keyboard.Key.caps_lock,
-        }
-        for i in range(1, 13):
-            vk_map[f'f{i}'] = getattr(pynput_keyboard.Key, f'f{i}')
-
-        pressed = []
-        try:
-            for k in keys:
-                k = str(k).lower()
-                key_obj = vk_map.get(k, k)
-                self.keyboard_controller.press(key_obj)
-                pressed.append(key_obj)
-            
-            time.sleep(0.01)
-        except Exception as e:
-            log.error(f"Error pressing keys {keys}: {e}")
-        finally:
-            for key_obj in reversed(pressed):
-                try:
-                    self.keyboard_controller.release(key_obj)
-                except Exception:
-                    pass
-
-    async def _send_region_state(self, ws: Any):
-        await ws.send(json.dumps({
-            'cmd': 'region_state',
-            'regionModeEnabled': self.region_mode_enabled,
-            'region': self.selected_region,
-        }))
-
-    async def _broadcast_region_state(self):
-        if not self.clients:
-            return
-
-        payload = json.dumps({
-            'cmd': 'region_state',
-            'regionModeEnabled': self.region_mode_enabled,
-            'region': self.selected_region,
-        })
-        dead_clients = set()
-        for ws in list(self.clients):
-            try:
-                await ws.send(payload)
-            except Exception:
-                dead_clients.add(ws)
-
-        for ws in dead_clients:
-            self.clients.discard(ws)
-
-    async def _select_region_from_overlay(self, preset: Optional[str] = None):
-        async with self._region_selection_lock:
-            region = await asyncio.to_thread(self._select_region_blocking, preset)
-            if region:
-                self.selected_region = region
-                self.region_mode_enabled = True
-                log.info(
-                    "Region selected: left=%d top=%d width=%d height=%d",
-                    region['left'], region['top'], region['width'], region['height']
-                )
-            else:
-                log.info("Region selection cancelled")
-
-    def _select_region_blocking(self, preset: Optional[str] = None) -> Optional[dict]:
-        if not preset:
-            preset = run_preset_chooser_app()
-        if not preset:
-            return None
-        cmd = [sys.executable, os.path.abspath(__file__), '--select-region', preset]
-        try:
-            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if completed.stdout:
-                return json.loads(completed.stdout.strip())
-        except Exception as exc:
-            log.error(f"Failed to launch region selector: {exc}")
-        return None
-
-        output = (completed.stdout or '').strip()
-        if not output:
-            return None
-
-        try:
-            data = json.loads(output)
-        except json.JSONDecodeError:
-            log.error(f"Region selector returned invalid output: {output}")
-            return None
-
-        if not isinstance(data, dict):
-            return None
-        return data
-
     async def _mirror_loop(self):
         if not HAS_MSS:
-            log.warning("mss not installed, low-latency mirroring unavailable.")
             return
-
         with mss.mss() as sct:
-            while self.enable_mirror and self.clients:
+            while True:
+                if not self.enable_mirror or not self.clients:
+                    await asyncio.sleep(0.5)
+                    continue
                 try:
-                    primary_mon = sct.monitors[1]  # Primary monitor (physical pixels)
-                    # Calculate display scaling factor (physical / logical)
+                    primary_mon = sct.monitors[1]
                     scale_x = primary_mon['width'] / max(1, self.width)
                     scale_y = primary_mon['height'] / max(1, self.height)
-
                     region = self.selected_region if self.region_mode_enabled and self.selected_region else None
                     if region:
                         monitor = {
@@ -1154,161 +625,501 @@ class DrawTabServer:
                         }
                     else:
                         monitor = primary_mon
-                    
-                    # Capture screen
+                        
                     sct_img = sct.grab(monitor)
-                    
-                    # Convert to JPEG using Pillow
                     if HAS_PILLOW:
                         from PIL import Image
                         img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                        
-                        # Downscale to reduce latency and bandwidth if it's large
-                        MAX_DIM = 1280
-                        if img.width > MAX_DIM or img.height > MAX_DIM:
-                            img.thumbnail((MAX_DIM, MAX_DIM), Image.Resampling.BILINEAR)
-                        
-                        # Compress with lower quality for maximum speed
+                        if img.width > 1280 or img.height > 1280:
+                            img.thumbnail((1280, 1280), Image.Resampling.BILINEAR)
                         buf = io.BytesIO()
                         img.save(buf, format="JPEG", quality=40, optimize=False)
-                        img_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
+                        payload = json.dumps({'cmd': 'mirror_frame', 'image_b64': base64.b64encode(buf.getvalue()).decode('utf-8')})
                         
-                        payload = json.dumps({
-                            'cmd': 'mirror_frame',
-                            'image_b64': img_b64
-                        })
-                        
-                        # Broadcast to all clients
                         dead_clients = set()
                         for ws in list(self.clients):
-                            try:
-                                await ws.send(payload)
-                            except Exception:
-                                dead_clients.add(ws)
-                        for ws in dead_clients:
-                            self.clients.discard(ws)
-                            
-                    await asyncio.sleep(1/30)  # ~30 FPS limit
+                            try: await ws.send(payload)
+                            except Exception: dead_clients.add(ws)
+                        for ws in dead_clients: self.clients.discard(ws)
+                    await asyncio.sleep(1/30)
                 except Exception as e:
-                    log.error(f"Mirror loop error: {e}")
                     await asyncio.sleep(1)
-        
-        if hasattr(self, '_mirror_task'):
-            delattr(self, '_mirror_task')
 
     async def start(self):
         self._loop = asyncio.get_running_loop()
         self.injector = create_injector(self.width, self.height)
-        self._start_hotkey_listener()
-        log.info(f"Build: {BUILD_TAG}")
-        log.info(f"DrawTab server starting on ws://{self.host}:{self.port}")
-        log.info(f"Input injection ready ({platform.system()})")
-        if HAS_MSS:
-            log.info("mss found: High-performance mirroring ready.")
-
-        # Print connection instructions
-        import socket
-        hostname = socket.gethostname()
-        local_ip = socket.gethostbyname(hostname)
-        print("\n" + "═" * 50)
-        print(f"  DrawTab Server Ready!")
-        print(f"  Connect your mobile app to:")
-        print(f"  IP:   {local_ip}")
-        print(f"  Port: {self.port}")
-        print("═" * 50 + "\n")
-
+        if self.enable_mirror:
+            asyncio.create_task(self._mirror_loop())
+            
         try:
-            async with websockets.serve(self.handle_client, self.host, self.port,
-                                         max_size=2 ** 20,
-                                         ping_interval=20,
-                                         ping_timeout=10):
-                await asyncio.Future()  # run forever
+            async with websockets.serve(self.handle_client, self.host, self.port, max_size=2**20, ping_interval=20, ping_timeout=10):
+                await asyncio.Future()
         finally:
-            self._stop_hotkey_listener()
             if self.injector:
                 self.injector.close()
 
-    def _start_hotkey_listener(self):
-        if not HAS_PYNPUT:
-            log.info("Hotkey listener unavailable (install pynput to enable Ctrl+Shift+R)")
-            return
 
-        if pynput_keyboard is None:
-            log.info("pynput module not available, hotkey disabled")
-            return
+# ─── GUI APPLICATION ─────────────────────────────────────────────────────────
 
-        def open_selector():
-            if not self._loop:
-                return
-            asyncio.run_coroutine_threadsafe(self._select_region_from_overlay(), self._loop)
+import socket
+import random
+import threading
+import customtkinter as ctk
+import pystray
+from PIL import Image, ImageDraw
 
+def generate_pin(ip: str, port: int) -> str:
+    # Hash IP and Port into a 6-digit numeric PIN
+    seed = f"{ip}:{port}"
+    hashed = hash(seed) % 1000000
+    return f"{abs(hashed):06d}"
+
+class DrawTabApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        
+        self.title("DrawTab Pro")
+        self.geometry("700x450")
+        self.resizable(False, False)
+        
+        # Theming
+        ctk.set_appearance_mode("Dark")
+        
+        # Network Setup
+        self.ip = socket.gethostbyname(socket.gethostname())
+        self.port = random.randint(8000, 9000)
+        self.pin = generate_pin(self.ip, self.port)
+        
+        self._build_ui()
+        
+        # System Tray Hook
+        self.protocol('WM_DELETE_WINDOW', self.hide_window)
+        self.tray_icon = None
+        
+        # Backend Server
+        self.server = None
+        self.server_thread = None
+        self._start_server()
+        
+        # UDP Discovery
+        self.udp_thread = threading.Thread(target=self._udp_listener, daemon=True)
+        self.udp_thread.start()
+
+    def _build_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        
+        # --- Left Sidebar ---
+        self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#16161A")
+        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_frame.grid_rowconfigure(7, weight=1)
+        
+        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="DrawTab Pro", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 20))
+        
+        self.display_label = ctk.CTkLabel(self.sidebar_frame, text="Target Display:", anchor="w")
+        self.display_label.grid(row=1, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.display_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Monitor 1", "Monitor 2", "Monitor 3"], command=self._on_display_changed)
+        self.display_menu.grid(row=2, column=0, padx=20, pady=(5, 10))
+        
+        self.region_label = ctk.CTkLabel(self.sidebar_frame, text="Capture Bounds:", anchor="w")
+        self.region_label.grid(row=3, column=0, padx=20, pady=(10, 0), sticky="w")
+        self.region_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Full Screen", "Tablet Bounds (16:10)", "Mobile Bounds (16:9)", "Custom Box Selection..."], command=self._on_region_changed)
+        self.region_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Full Screen", "Tablet Bounds (16:10)", "Mobile Bounds (9:16)", "Custom Box Selection..."], command=self._on_region_changed)
+        self.region_menu.grid(row=4, column=0, padx=20, pady=(5, 15))
+        
+        self.lock_switch = ctk.CTkSwitch(self.sidebar_frame, text="Region Lock", command=self._on_lock_changed)
+        self.lock_switch.grid(row=5, column=0, padx=20, pady=(10, 10), sticky="nw")
+        
+        self.mirror_switch = ctk.CTkSwitch(self.sidebar_frame, text="Screen Mirroring", command=self._on_mirror_changed)
+        self.mirror_switch.grid(row=8, column=0, padx=20, pady=(5, 20))
+
+        # --- Main Console ---
+        self.main_frame = ctk.CTkFrame(self, fg_color="#121214", corner_radius=0)
+        self.main_frame.grid(row=0, column=1, sticky="nsew")
+        self.main_frame.grid_rowconfigure(0, weight=1)
+        self.main_frame.grid_rowconfigure(2, weight=1)
+        self.main_frame.grid_columnconfigure(0, weight=1)
+        
+        # Center Card Container
+        self.card_frame = ctk.CTkFrame(self.main_frame, fg_color="#1A1A1E", corner_radius=15, width=400, height=250, border_width=1, border_color="#2A2A2E")
+        self.card_frame.grid(row=1, column=0, padx=20, pady=20)
+        self.card_frame.grid_propagate(False)
+        self.card_frame.grid_rowconfigure(0, weight=1)
+        self.card_frame.grid_rowconfigure(3, weight=1)
+        self.card_frame.grid_columnconfigure(0, weight=1)
+        
+        self.instruction_label = ctk.CTkLabel(self.card_frame, text="INPUT PAIRING KEY ON TABLET PIPELINE", 
+                                              font=ctk.CTkFont(size=11, weight="bold"), text_color="#8A2BE2")
+        self.instruction_label.grid(row=1, column=0, pady=(40, 10))
+        
+        self.pin_label = ctk.CTkLabel(self.card_frame, text=self.pin, 
+                                      font=ctk.CTkFont(family="Consolas", size=56, weight="bold"), text_color="#FFFFFF")
+        self.pin_label.grid(row=2, column=0, pady=(0, 40))
+        
+        # Debug Footer
+        self.footnote_label = ctk.CTkLabel(self.main_frame, text=f"Host IP: {self.ip}  •  Active Port: {self.port}  •  UDP Discovery Active", 
+                                           font=ctk.CTkFont(size=10), text_color="#444444")
+        self.footnote_label.grid(row=3, column=0, pady=(0, 10), sticky="s")
+
+    def _on_display_changed(self, choice: str):
+        if not self.server: return
+        idx = int(choice.split()[-1]) - 1
+        self.server.active_monitor_index = max(0, idx)
+        self.server.broadcast_region_state()
+
+    def _on_region_changed(self, choice: str):
+        if not self.server: return
+        w, h = 1920, 1080 # Fallback bounds if MSS is not queried dynamically
         try:
-            self._hotkey_listener = pynput_keyboard.GlobalHotKeys({
-                '<ctrl>+<shift>+r': open_selector,
-            })
-            self._hotkey_listener.start()
-            log.info("Hotkey ready: Ctrl+Shift+R opens region selector")
-        except Exception as exc:
-            log.warning(f"Hotkey listener unavailable: {exc}")
-
-    def _stop_hotkey_listener(self):
-        listener = self._hotkey_listener
-        self._hotkey_listener = None
-        if listener is not None:
-            try:
-                listener.stop()
-            except Exception:
-                pass
-
-
-# ─── ENTRY POINT ─────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description='DrawTab Desktop Server')
-    parser.add_argument('--host', default='0.0.0.0', help='Listen host')
-    parser.add_argument('--port', type=int, default=8765, help='WebSocket port')
-    parser.add_argument('--width', type=int, default=0, help='Screen width (0=auto)')
-    parser.add_argument('--height', type=int, default=0, help='Screen height (0=auto)')
-    parser.add_argument('--mirror', action='store_true', help='Enable screen mirroring')
-    parser.add_argument('--select-region', type=str, metavar='PRESET', help='Launch the region selector window with PRESET and print the selected region as JSON')
-    args = parser.parse_args()
-
-    if args.select_region is not None:
-        region = run_region_selector_app(args.select_region)
-        if region:
-            print(json.dumps(region))
-            return
-        return
-
-    # Auto-detect screen resolution
-    if args.width == 0 or args.height == 0:
-        try:
-            import tkinter as tk
-            root = tk.Tk()
-            root.withdraw()
-            w, h = root.winfo_screenwidth(), root.winfo_screenheight()
-            root.destroy()
-            args.width = args.width or w
-            args.height = args.height or h
-            log.info(f"Auto-detected screen: {args.width}×{args.height}")
+            import mss
+            with mss.mss() as sct:
+                idx = self.server.active_monitor_index + 1
+                if idx < len(sct.monitors):
+                    mon = sct.monitors[idx]
+                    w, h = mon['width'], mon['height']
         except Exception:
-            args.width = args.width or 1920
-            args.height = args.height or 1080
-            log.info(f"Using default screen: {args.width}×{args.height}")
+            pass
 
-    server = DrawTabServer(
-        host=args.host,
-        port=args.port,
-        width=args.width,
-        height=args.height,
-        enable_mirror=args.mirror
-    )
+        if "Full Screen" in choice:
+            self.server.region_mode_enabled = False
+            self.server.selected_region = None
+            self.server.broadcast_region_state()
+        elif "16:10" in choice:
+            self._launch_custom_region_selector(target_ratio=16/10)
+        elif "9:16" in choice:
+            self._launch_custom_region_selector(target_ratio=9/16)
+        elif "Custom" in choice:
+            self._launch_custom_region_selector(target_ratio=None)
+        
+    def _launch_custom_region_selector(self, target_ratio: float = None):
+        import tkinter as tk
+        selector = tk.Toplevel(self)
+        selector.attributes('-fullscreen', True)
+        selector.attributes('-alpha', 0.4)
+        selector.configure(cursor="cross")
+        selector.attributes("-topmost", True)
+        
+        canvas = tk.Canvas(selector, highlightthickness=0, bg='black')
+        canvas.pack(fill='both', expand=True)
+        
+        screen_w = selector.winfo_screenwidth()
+        screen_h = selector.winfo_screenheight()
+        
+        rect = None
+        box_coords = [0, 0, 0, 0] # left, top, right, bottom
+        state = "idle" # "idle", "drawing", "moving", "resizing"
+        start_x = 0
+        start_y = 0
+        current_ratio = target_ratio
+        resize_edge = None
+        
+        def draw_box():
+            nonlocal rect
+            if rect: canvas.delete(rect)
+            canvas.delete("text")
+            if box_coords[2] > box_coords[0] and box_coords[3] > box_coords[1]:
+                rect = canvas.create_rectangle(*box_coords, outline='red', width=3, fill='gray')
+                if current_ratio:
+                    canvas.create_text(
+                        (box_coords[0] + box_coords[2]) / 2, 
+                        (box_coords[1] + box_coords[3]) / 2, 
+                        text="Drag edges to resize\nPress SPACE to rotate\nPress ENTER to confirm", 
+                        fill="white", font=("Arial", 14, "bold"), justify="center", tags="text"
+                    )
+                else:
+                    canvas.create_text(
+                        (box_coords[0] + box_coords[2]) / 2, 
+                        (box_coords[1] + box_coords[3]) / 2, 
+                        text="Drag edges to resize\nPress ENTER to confirm", 
+                        fill="white", font=("Arial", 14, "bold"), justify="center", tags="text"
+                    )
+                
+        # If preset, initialize a centered box
+        if current_ratio:
+            if abs(current_ratio - 16/10) < 0.01: # Tablet Landscape
+                bw, bh = 1040, 680
+            elif abs(current_ratio - 10/16) < 0.01: # Tablet Portrait
+                bw, bh = 680, 1040
+            elif abs(current_ratio - 9/16) < 0.01: # Mobile Portrait
+                bw, bh = 500, 850
+            elif abs(current_ratio - 16/9) < 0.01: # Mobile Landscape
+                bw, bh = 850, 500
+            else:
+                bw, bh = screen_w * 0.5, screen_h * 0.5
+                
+            cx, cy = screen_w / 2, screen_h / 2
+            box_coords = [cx - bw/2, cy - bh/2, cx + bw/2, cy + bh/2]
+            draw_box()
+            
+        def on_rotate(event):
+            nonlocal current_ratio
+            if current_ratio and rect:
+                current_ratio = 1 / current_ratio
+                cx = (box_coords[0] + box_coords[2]) / 2
+                cy = (box_coords[1] + box_coords[3]) / 2
+                w = abs(box_coords[2] - box_coords[0])
+                h = abs(box_coords[3] - box_coords[1])
+                bw = h
+                bh = w
+                box_coords[0] = cx - bw/2
+                box_coords[1] = cy - bh/2
+                box_coords[2] = cx + bw/2
+                box_coords[3] = cy + bh/2
+                draw_box()
+                
+        selector.bind("<space>", on_rotate)
+        selector.bind("r", on_rotate)
+        selector.bind("R", on_rotate)
+            
+        def on_press(event):
+            nonlocal start_x, start_y, state, resize_edge
+            start_x, start_y = event.x, event.y
+            
+            if rect:
+                margin = 40
+                in_box = box_coords[0] - margin < start_x < box_coords[2] + margin and box_coords[1] - margin < start_y < box_coords[3] + margin
+                if in_box:
+                    on_left = abs(start_x - box_coords[0]) < margin
+                    on_right = abs(start_x - box_coords[2]) < margin
+                    on_top = abs(start_y - box_coords[1]) < margin
+                    on_bottom = abs(start_y - box_coords[3]) < margin
+                    
+                    if on_right and on_bottom: resize_edge = "br"
+                    elif on_right and on_top: resize_edge = "tr"
+                    elif on_left and on_bottom: resize_edge = "bl"
+                    elif on_left and on_top: resize_edge = "tl"
+                    elif on_right: resize_edge = "r"
+                    elif on_left: resize_edge = "l"
+                    elif on_bottom: resize_edge = "b"
+                    elif on_top: resize_edge = "t"
+                    else: resize_edge = None
+                    
+                    if resize_edge:
+                        state = "resizing"
+                    else:
+                        state = "moving"
+                    return
 
-    try:
-        asyncio.run(server.start())
-    except KeyboardInterrupt:
-        log.info("Server stopped.")
+            state = "drawing"
+            box_coords[0] = start_x
+            box_coords[1] = start_y
+            box_coords[2] = start_x
+            box_coords[3] = start_y
+            draw_box()
+                
+        def on_drag(event):
+            nonlocal state, start_x, start_y, resize_edge
+            if state == "moving":
+                dx = event.x - start_x
+                dy = event.y - start_y
+                box_coords[0] += dx
+                box_coords[1] += dy
+                box_coords[2] += dx
+                box_coords[3] += dy
+                start_x, start_y = event.x, event.y
+                draw_box()
+            elif state == "resizing":
+                old_coords = list(box_coords)
+                dx = event.x - start_x
+                dy = event.y - start_y
+                
+                if "r" in resize_edge: box_coords[2] += dx
+                if "l" in resize_edge: box_coords[0] += dx
+                if "b" in resize_edge: box_coords[3] += dy
+                if "t" in resize_edge: box_coords[1] += dy
+                
+                if current_ratio:
+                    w = abs(box_coords[2] - box_coords[0])
+                    h = abs(box_coords[3] - box_coords[1])
+                    if h == 0: h = 1
+                    
+                    if w / h > current_ratio:
+                        if "r" in resize_edge or "l" in resize_edge:
+                            h = w / current_ratio
+                            if "t" in resize_edge: box_coords[1] = box_coords[3] - h
+                            else: box_coords[3] = box_coords[1] + h
+                        else:
+                            w = h * current_ratio
+                            if "l" in resize_edge: box_coords[0] = box_coords[2] - w
+                            else: box_coords[2] = box_coords[0] + w
+                    else:
+                        if "b" in resize_edge or "t" in resize_edge:
+                            w = h * current_ratio
+                            if "l" in resize_edge: box_coords[0] = box_coords[2] - w
+                            else: box_coords[2] = box_coords[0] + w
+                        else:
+                            h = w / current_ratio
+                            if "t" in resize_edge: box_coords[1] = box_coords[3] - h
+                            else: box_coords[3] = box_coords[1] + h
+                            
+                    final_w = abs(box_coords[2] - box_coords[0])
+                    final_h = abs(box_coords[3] - box_coords[1])
+                    min_w, max_w = 0, screen_w
+                    min_h, max_h = 0, screen_h
+                    
+                    if abs(current_ratio - 16/10) < 0.01 or abs(current_ratio - 10/16) < 0.01:
+                        base_w = 1040 if current_ratio > 1 else 680
+                        base_h = 680 if current_ratio > 1 else 1040
+                        min_w, max_w = base_w - 50, base_w + 50
+                        min_h, max_h = base_h - 50, base_h + 50
+                    elif abs(current_ratio - 16/9) < 0.01 or abs(current_ratio - 9/16) < 0.01:
+                        base_w = 850 if current_ratio > 1 else 500
+                        base_h = 500 if current_ratio > 1 else 850
+                        min_w, max_w = base_w - 50, base_w + 50
+                        min_h, max_h = base_h - 50, base_h + 50
+                        
+                    if final_w < min_w or final_h < min_h or final_w > max_w or final_h > max_h:
+                        for i in range(4): box_coords[i] = old_coords[i]
+                        return
+                        
+                start_x, start_y = event.x, event.y
+                draw_box()
+            elif state == "drawing":
+                end_x, end_y = event.x, event.y
+                if current_ratio:
+                    w = abs(end_x - box_coords[0])
+                    h = abs(end_y - box_coords[1])
+                    if h == 0: h = 1
+                    if w / h > current_ratio:
+                        end_x = box_coords[0] + (1 if end_x > box_coords[0] else -1) * (h * current_ratio)
+                    else:
+                        end_y = box_coords[1] + (1 if end_y > box_coords[1] else -1) * (w / current_ratio)
+                box_coords[2] = end_x
+                box_coords[3] = end_y
+                draw_box()
+                
+        def on_release(event):
+            nonlocal state
+            # Normalize coords
+            left = min(box_coords[0], box_coords[2])
+            top = min(box_coords[1], box_coords[3])
+            right = max(box_coords[0], box_coords[2])
+            bottom = max(box_coords[1], box_coords[3])
+            box_coords[:] = [left, top, right, bottom]
+            draw_box()
+            state = "idle"
+            
+        def on_confirm(event):
+            width = box_coords[2] - box_coords[0]
+            height = box_coords[3] - box_coords[1]
+            if width > 10 and height > 10 and self.server:
+                self.server.region_mode_enabled = True
+                self.server.selected_region = {'left': box_coords[0], 'top': box_coords[1], 'width': width, 'height': height}
+                self.server.broadcast_region_state()
+            selector.destroy()
+            
+        def on_flip(event):
+            nonlocal current_ratio
+            if current_ratio and box_coords[2] > box_coords[0]:
+                current_ratio = 1 / current_ratio
+                cx = (box_coords[0] + box_coords[2]) / 2
+                cy = (box_coords[1] + box_coords[3]) / 2
+                w = box_coords[2] - box_coords[0]
+                h = box_coords[3] - box_coords[1]
+                # swap w and h
+                box_coords[:] = [cx - h/2, cy - w/2, cx + h/2, cy + w/2]
+                draw_box()
+            
+        def on_escape(event):
+            selector.destroy()
+            
+        canvas.bind('<ButtonPress-1>', on_press)
+        canvas.bind('<B1-Motion>', on_drag)
+        canvas.bind('<ButtonRelease-1>', on_release)
+        selector.bind('<Return>', on_confirm)
+        selector.bind('<space>', on_flip)
+        selector.bind('r', on_flip)
+        selector.bind('<Escape>', on_escape)
+        
+    def _on_lock_changed(self):
+        if not self.server: return
+        self.server.region_locked = bool(self.lock_switch.get())
+        self.server.broadcast_region_state()
 
+    def _on_mirror_changed(self):
+        if not self.server: return
+        is_on = bool(self.mirror_switch.get())
+        self.server.enable_mirror = is_on
+        if not is_on:
+            payload = json.dumps({'cmd': 'mirror_stopped'})
+            for ws in list(self.server.clients):
+                try: asyncio.run_coroutine_threadsafe(ws.send(payload), self.server._loop)
+                except Exception: pass
+
+    def _start_server(self):
+        def _run_asyncio():
+            self.server = DrawTabServer(host="0.0.0.0", port=self.port, width=1920, height=1080, enable_mirror=False)
+            
+            def update_lock_switch(locked):
+                if locked:
+                    self.lock_switch.select()
+                else:
+                    self.lock_switch.deselect()
+            
+            self.server.on_lock_changed_callback = lambda locked: self.after(0, lambda: update_lock_switch(locked))
+            
+            try:
+                asyncio.run(self.server.start())
+            except Exception as e:
+                print(f"Asyncio Server Error: {e}")
+            
+        self.server_thread = threading.Thread(target=_run_asyncio, daemon=True)
+        self.server_thread.start()
+        
+    def _udp_listener(self):
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('0.0.0.0', 8764))
+        while True:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if b'Who is DrawTab?' in data:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    try:
+                        s.connect((addr[0], 1))
+                        ip = s.getsockname()[0]
+                    except Exception:
+                        ip = self.ip
+                    finally:
+                        s.close()
+                    resp = json.dumps({'pin': self.pin, 'port': self.port, 'ip': ip}).encode('utf-8')
+                    sock.sendto(resp, addr)
+            except Exception:
+                time.sleep(1)
+
+    def create_tray_image(self):
+        image = Image.new('RGB', (64, 64), color=(26, 26, 30))
+        d = ImageDraw.Draw(image)
+        d.text((15, 25), "DT", fill=(138, 43, 226))
+        return image
+
+    def hide_window(self):
+        self.withdraw()
+        image = self.create_tray_image()
+        menu = pystray.Menu(
+            pystray.MenuItem('Restore DrawTab Pro', self.show_window, default=True),
+            pystray.MenuItem('Quit', self.quit_window)
+        )
+        self.tray_icon = pystray.Icon("drawtab", image, "DrawTab Pro", menu)
+        threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def show_window(self, icon, item):
+        icon.stop()
+        self.after(0, self.deiconify)
+
+    def quit_window(self, icon, item):
+        icon.stop()
+        self.quit()
 
 if __name__ == '__main__':
-    main()
+    import ctypes
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try: ctypes.windll.user32.SetProcessDPIAware()
+        except Exception: pass
+        
+    app = DrawTabApp()
+    app.mainloop()

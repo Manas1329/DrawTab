@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -77,21 +78,104 @@ class MainMenuScreen extends StatefulWidget {
 }
 
 class _MainMenuScreenState extends State<MainMenuScreen> {
-  final _ipController = TextEditingController(text: '192.168.1.100');
-  final _portController = TextEditingController(text: '8765');
+  final _pinController = TextEditingController();
+  final _focusNode = FocusNode();
   bool _connecting = false;
   String _status = '';
+  bool _isFocused = false;
 
-  Future<void> _connect() async {
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(() {
+      setState(() {
+        _isFocused = _focusNode.hasFocus;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _pinController.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _resolvePinAndConnect() async {
+    final pin = _pinController.text.trim();
+    if (pin.length != 6) {
+      setState(() {
+        _status = 'Invalid PIN format';
+      });
+      return;
+    }
+
     setState(() {
       _connecting = true;
-      _status = 'Connecting...';
+      _status = 'Locating DrawTab Server...';
     });
 
-    final uri = Uri.parse('ws://${_ipController.text}:${_portController.text}');
+    // Implement Subnet Locator Ping / UDP Broadcast
+    RawDatagramSocket? socket;
     try {
-      final channel = IOWebSocketChannel.connect(uri,
-          connectTimeout: const Duration(seconds: 5));
+      socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      socket.broadcastEnabled = true;
+      
+      final broadcastAddress = InternetAddress('255.255.255.255');
+      final portToBroadcast = 8764;
+      final payload = utf8.encode('Who is DrawTab?');
+      
+      socket.send(payload, broadcastAddress, portToBroadcast);
+      
+      bool found = false;
+      String? targetHost;
+      int? targetPort;
+      
+      final timer = Timer(const Duration(seconds: 5), () {
+        if (!found && mounted) {
+          socket?.close();
+          setState(() {
+            _status = 'Connection timed out. Server not found.';
+            _connecting = false;
+          });
+        }
+      });
+
+      socket.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          final datagram = socket?.receive();
+          if (datagram != null) {
+            try {
+              final responseStr = utf8.decode(datagram.data);
+              final jsonResponse = jsonDecode(responseStr);
+              if (jsonResponse['pin'] == pin) {
+                found = true;
+                timer.cancel();
+                targetHost = jsonResponse['ip'] ?? datagram.address.address;
+                targetPort = jsonResponse['port'];
+                socket?.close();
+                
+                _connectToServer(targetHost!, targetPort!);
+              }
+            } catch (e) {
+              // Ignore parse errors from other packets
+            }
+          }
+        }
+      });
+    } catch (e) {
+      setState(() {
+        _status = 'UDP Discovery failed: $e';
+        _connecting = false;
+      });
+      socket?.close();
+    }
+  }
+
+  void _connectToServer(String host, int port) async {
+    final uri = Uri.parse('ws://$host:$port');
+    try {
+      final channel = IOWebSocketChannel.connect(uri, connectTimeout: const Duration(seconds: 5));
       await channel.ready;
 
       if (!mounted) return;
@@ -104,6 +188,7 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
         setState(() {
           _connecting = false;
           _status = '';
+          _pinController.clear();
         });
       });
     } catch (e) {
@@ -114,106 +199,167 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
     }
   }
 
-  void _showConnectionDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: Theme.of(context).colorScheme.surface,
-        title: Text('Connect to Desktop', style: TextStyle(color: Theme.of(context).textTheme.bodyLarge?.color)),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: _ipController,
-                decoration: const InputDecoration(labelText: 'IP Address'),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _portController,
-                decoration: const InputDecoration(labelText: 'Port (8765)'),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _connect();
-            },
-            child: const Text('Connect'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final isDark = DrawTabApp.of(context)?.isDark ?? true;
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+
     return Scaffold(
+      backgroundColor: const Color(0xFF121214), // Deep slate/charcoal workspace
       body: SafeArea(
         child: Stack(
           children: [
-            Builder(
-              builder: (context) {
-                final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
-                return Padding(
-                  padding: EdgeInsets.only(right: isLandscape ? 30.0 : 0.0),
-                  child: SizedBox(
-                    width: double.infinity,
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.center,
-                      children: [
-                        const Icon(Icons.draw_outlined, size: 80, color: Color(0xFF6C63FF)),
-                        const SizedBox(height: 16),
-                        Text('DrawTab', style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Theme.of(context).textTheme.bodyLarge?.color)),
-                        const SizedBox(height: 8),
-                        Text('Turn your device into a drawing tablet', style: TextStyle(color: Theme.of(context).textTheme.bodySmall?.color, fontSize: 16)),
-                        const SizedBox(height: 16),
-                        if (_connecting)
-                          Column(
-                            children: [
-                              const CircularProgressIndicator(color: Color(0xFF6C63FF)),
-                              const SizedBox(height: 16),
-                              Text(_status, style: TextStyle(color: Theme.of(context).textTheme.bodySmall?.color)),
-                            ],
-                          )
-                        else
-                          ElevatedButton.icon(
-                            icon: const Icon(Icons.link, size: 24),
-                            label: const Text('Connect to Server', style: TextStyle(fontSize: 18)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF6C63FF),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                            ),
-                            onPressed: _showConnectionDialog,
-                          ),
-                        if (!_connecting && _status.isNotEmpty) ...[
-                          const SizedBox(height: 16),
-                          Text(_status, style: const TextStyle(color: Colors.redAccent)),
-                        ]
-                      ],
+            // Title Context Header
+            Positioned(
+              top: 16,
+              left: 24,
+              right: 16,
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'DrawTab . Pipeline Hub',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w300,
+                      letterSpacing: 1.5,
                     ),
                   ),
-                );
-              }
+                  IconButton(
+                    icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode, size: 20),
+                    color: Colors.white70,
+                    onPressed: () => DrawTabApp.of(context)?.toggleTheme(),
+                  ),
+                ],
+              ),
             ),
-            Positioned(
-              top: 8,
-              right: 16,
-              child: IconButton(
-                icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode),
-                color: Theme.of(context).iconTheme.color,
-                onPressed: () => DrawTabApp.of(context)?.toggleTheme(),
+            
+            // Connection Input Deck
+            Center(
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: isLandscape ? 120.0 : 32.0),
+                child: Container(
+                  padding: const EdgeInsets.all(40),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1A1A1E).withOpacity(0.85),
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.1),
+                      width: 1,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.3),
+                        blurRadius: 30,
+                        offset: const Offset(0, 10),
+                      )
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(24),
+                    child: BackdropFilter(
+                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text(
+                            'Enter 6-Digit Desktop Code',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              SizedBox(
+                                width: 220,
+                                child: TextField(
+                                  controller: _pinController,
+                                  focusNode: _focusNode,
+                                  maxLength: 6,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    fontFamily: 'Courier',
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 12,
+                                    color: Colors.white,
+                                  ),
+                                  keyboardType: TextInputType.number,
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.digitsOnly,
+                                  ],
+                                  decoration: InputDecoration(
+                                    counterText: "", // Hide the character counter
+                                    filled: true,
+                                    fillColor: const Color(0xFF121214),
+                                    contentPadding: const EdgeInsets.symmetric(vertical: 20),
+                                    enabledBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: BorderSide(
+                                        color: Colors.white.withOpacity(0.2),
+                                        width: 1,
+                                      ),
+                                    ),
+                                    focusedBorder: OutlineInputBorder(
+                                      borderRadius: BorderRadius.circular(12),
+                                      borderSide: const BorderSide(
+                                        color: Color(0xFF00E5FF), // Neon Cyan
+                                        width: 1,
+                                      ),
+                                    ),
+                                  ),
+                                  onSubmitted: (_) => _resolvePinAndConnect(),
+                                ),
+                              ),
+                              const SizedBox(width: 16),
+                              Container(
+                                height: 72,
+                                width: 72,
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF7C4DFF), // Neon Purple Execution Button
+                                  borderRadius: BorderRadius.circular(16),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(0xFF7C4DFF).withOpacity(0.4),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    )
+                                  ],
+                                ),
+                                child: _connecting
+                                    ? const Padding(
+                                        padding: EdgeInsets.all(24.0),
+                                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                                      )
+                                    : IconButton(
+                                        icon: const Icon(Icons.arrow_forward_ios, color: Colors.white),
+                                        onPressed: _resolvePinAndConnect,
+                                      ),
+                              ),
+                            ],
+                          ),
+                          if (_status.isNotEmpty) ...[
+                            const SizedBox(height: 24),
+                            Text(
+                              _status,
+                              style: const TextStyle(
+                                color: Colors.redAccent,
+                                fontSize: 12,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ]
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
@@ -305,7 +451,6 @@ class _DrawingScreenState extends State<DrawingScreen> {
   bool _regionLocked = false;
   Map<String, dynamic>? _serverRegion;
 
-  bool _mirrorEnabled = false;
   Uint8List? _mirrorFrame;
   bool _keypadEnabled = false;
 
@@ -352,11 +497,16 @@ class _DrawingScreenState extends State<DrawingScreen> {
             if (data['cmd'] == 'region_state') {
               setState(() {
                 _regionModeEnabled = data['regionModeEnabled'] ?? false;
+                _regionLocked = data['regionLocked'] ?? _regionLocked;
                 _serverRegion = data['region'];
               });
             } else if (data['cmd'] == 'mirror_frame') {
               setState(() {
                 _mirrorFrame = base64Decode(data['image_b64']);
+              });
+            } else if (data['cmd'] == 'mirror_stopped') {
+              setState(() {
+                _mirrorFrame = null;
               });
             }
           } else if (message is List<int>) {
@@ -404,8 +554,6 @@ class _DrawingScreenState extends State<DrawingScreen> {
         _reconnecting = false;
         _status = 'Connected';
       });
-      
-      _sendCommand({'cmd': 'set_mirror_mode', 'enabled': _mirrorEnabled});
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -479,7 +627,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
     final isPen = e.kind == PointerDeviceKind.stylus || e.kind == PointerDeviceKind.invertedStylus;
     int buttons = 1;
-    if (e.kind == PointerDeviceKind.invertedStylus) buttons = 32;
+    if (e.kind == PointerDeviceKind.invertedStylus || _eraserMode) buttons = 32;
 
     return DrawEvent(
       type: type,
@@ -633,7 +781,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                     color: Colors.transparent,
                     child: Stack(
                       children: [
-                        if (_mirrorEnabled && _mirrorFrame != null)
+                        if (_mirrorFrame != null)
                           Positioned.fill(
                             child: Image.memory(
                               _mirrorFrame!,
@@ -714,31 +862,13 @@ class _DrawingScreenState extends State<DrawingScreen> {
                               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                               children: [
                                 _buildNavIcon(
-                                  _regionModeEnabled ? Icons.aspect_ratio : Icons.fullscreen,
-                                  'Region Mode',
-                                  () {
-                                    if (_regionModeEnabled) {
-                                      _sendCommand({'cmd': 'region_mode', 'enabled': false});
-                                    } else {
-                                      _requestRegionSelection();
-                                    }
-                                  },
-                                  _regionModeEnabled ? theme.colorScheme.primary : null
-                                ),
-                                _buildNavIcon(
                                   _regionLocked ? Icons.lock : Icons.lock_open,
                                   'Region Lock',
-                                  () => setState(() => _regionLocked = !_regionLocked),
-                                  _regionLocked ? Colors.redAccent : theme.colorScheme.primary
-                                ),
-                                _buildNavIcon(
-                                  _mirrorEnabled ? Icons.cast_connected : Icons.cast,
-                                  'Screen Mirror',
                                   () {
-                                    setState(() => _mirrorEnabled = !_mirrorEnabled);
-                                    _sendCommand({'cmd': 'set_mirror_mode', 'enabled': _mirrorEnabled});
+                                    setState(() => _regionLocked = !_regionLocked);
+                                    _sendCommand({'cmd': 'set_region_lock', 'enabled': _regionLocked});
                                   },
-                                  _mirrorEnabled ? theme.colorScheme.primary : null
+                                  _regionLocked ? Colors.redAccent : theme.colorScheme.primary
                                 ),
                                 _buildNavIcon(
                                   Icons.keyboard,
@@ -758,7 +888,6 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                   'Toggle Tool',
                                   () {
                                     setState(() => _eraserMode = !_eraserMode);
-                                    _sendCommand({'cmd': 'key', 'keys': [_eraserMode ? _eraserShortcut : _drawShortcut]});
                                   },
                                   _eraserMode ? Colors.redAccent : null
                                 ),
@@ -818,7 +947,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
                   leftOffset = position.dx;
                 }
                 return Positioned(
-                  top: 90, 
+                  top: 120, 
                   left: leftOffset, 
                   child: Material(
                     color: Colors.transparent,
