@@ -390,6 +390,10 @@ class DrawTabServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.keyboard_controller = pynput_keyboard.Controller() if HAS_PYNPUT else None
 
+        self.client_is_pro = False
+        self.session_paused = False
+        self.on_pipeline_status_changed = None
+
         self._evt_count = 0
         self._last_report = time.time()
         self._max_lag_ms = 0.0
@@ -416,6 +420,9 @@ class DrawTabServer:
         asyncio.run_coroutine_threadsafe(_send(), self._loop)
 
     def _process_batch(self, batch: list):
+        if self.session_paused:
+            return
+            
         now_us = time.monotonic_ns() // 1000
         active_region = self.selected_region if self.region_mode_enabled else None
         for raw in batch:
@@ -558,6 +565,17 @@ class DrawTabServer:
                         await ws.send(json.dumps({'cmd': 'pong', 'ts': data.get('ts')}))
                     elif cmd == 'get_state':
                         pass # Triggered implicitly or ignored in new architecture
+                    elif cmd == 'session_heartbeat':
+                        time_remaining = data.get('time_remaining', 0)
+                        self.session_paused = (time_remaining <= 0)
+                    elif cmd == 'client_handshake':
+                        self.client_is_pro = (data.get('tier') == 'pro')
+                        if self.on_pipeline_status_changed:
+                            self.on_pipeline_status_changed(self.client_is_pro)
+                    elif cmd == 'initialize_stream':
+                        self.client_is_pro = data.get('is_pro', False)
+                        if self.on_pipeline_status_changed:
+                            self.on_pipeline_status_changed(self.client_is_pro)
                     elif cmd == 'set_region_lock':
                         self.region_locked = bool(data.get('enabled', False))
                         if getattr(self, 'on_lock_changed_callback', None):
@@ -601,6 +619,8 @@ class DrawTabServer:
             pass
         finally:
             self.clients.discard(ws)
+            if len(self.clients) == 0 and getattr(self, 'on_pipeline_status_changed', None):
+                self.on_pipeline_status_changed(None)
             log.info(f"Client disconnected: {addr}")
 
     async def _mirror_loop(self):
@@ -608,10 +628,10 @@ class DrawTabServer:
             return
         with mss.mss() as sct:
             while True:
-                if not self.enable_mirror or not self.clients:
-                    await asyncio.sleep(0.5)
-                    continue
                 try:
+                    if not self.enable_mirror or not self.clients or self.session_paused:
+                        await asyncio.sleep(0.1)
+                        continue
                     primary_mon = sct.monitors[1]
                     scale_x = primary_mon['width'] / max(1, self.width)
                     scale_y = primary_mon['height'] / max(1, self.height)
@@ -633,7 +653,8 @@ class DrawTabServer:
                         if img.width > 1280 or img.height > 1280:
                             img.thumbnail((1280, 1280), Image.Resampling.BILINEAR)
                         buf = io.BytesIO()
-                        img.save(buf, format="JPEG", quality=40, optimize=False)
+                        jpeg_quality = 80 if self.client_is_pro else 40
+                        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=False)
                         payload = json.dumps({'cmd': 'mirror_frame', 'image_b64': base64.b64encode(buf.getvalue()).decode('utf-8')})
                         
                         dead_clients = set()
@@ -641,7 +662,9 @@ class DrawTabServer:
                             try: await ws.send(payload)
                             except Exception: dead_clients.add(ws)
                         for ws in dead_clients: self.clients.discard(ws)
-                    await asyncio.sleep(1/30)
+                    
+                    sleep_delay = 1/60 if self.client_is_pro else 1/30
+                    await asyncio.sleep(sleep_delay)
                 except Exception as e:
                     await asyncio.sleep(1)
 
@@ -679,11 +702,20 @@ class DrawTabApp(ctk.CTk):
         super().__init__()
         
         self.title("DrawTab Pro")
-        self.geometry("700x450")
+        self.geometry("850x450")
         self.resizable(False, False)
         
+        icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
+        
+        self.config_path = os.path.join(os.path.dirname(__file__), 'config.json')
+        self.config_data = self._load_config()
+        self.preset_slots = self.config_data.get('presets', {})
+        self.is_pro = False
+        
         # Theming
-        ctk.set_appearance_mode("Dark")
+        ctk.set_appearance_mode(self.config_data.get('theme', 'Dark'))
         
         # Network Setup
         self.ip = socket.gethostbyname(socket.gethostname())
@@ -704,58 +736,113 @@ class DrawTabApp(ctk.CTk):
         # UDP Discovery
         self.udp_thread = threading.Thread(target=self._udp_listener, daemon=True)
         self.udp_thread.start()
+    def _load_config(self):
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {'theme': 'Dark', 'presets': {}}
+        
+    def _save_config(self):
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(self.config_data, f)
+        except Exception as e:
+            log.error(f"Failed to save config: {e}")
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
         
         # --- Left Sidebar ---
-        self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color="#16161A")
+        self.sidebar_frame = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=("#E0E0E0", "#0B0C15"))
         self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
         self.sidebar_frame.grid_rowconfigure(7, weight=1)
         
-        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="DrawTab Pro", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label = ctk.CTkLabel(self.sidebar_frame, text="DrawTab Pro", font=ctk.CTkFont(size=22, weight="bold"), text_color=("black", "white"))
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 20))
         
         self.display_label = ctk.CTkLabel(self.sidebar_frame, text="Target Display:", anchor="w")
         self.display_label.grid(row=1, column=0, padx=20, pady=(10, 0), sticky="w")
-        self.display_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Monitor 1", "Monitor 2", "Monitor 3"], command=self._on_display_changed)
+        self.display_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Monitor 1", "Monitor 2", "Monitor 3"], command=self._on_display_changed,
+                                              fg_color=("#BA68C8", "#7B1FA2"), button_color=("#AB47BC", "#6A1B9A"), button_hover_color=("#9C27B0", "#4A148C"))
         self.display_menu.grid(row=2, column=0, padx=20, pady=(5, 10))
         
         self.region_label = ctk.CTkLabel(self.sidebar_frame, text="Capture Bounds:", anchor="w")
         self.region_label.grid(row=3, column=0, padx=20, pady=(10, 0), sticky="w")
-        self.region_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Full Screen", "Tablet Bounds (16:10)", "Mobile Bounds (16:9)", "Custom Box Selection..."], command=self._on_region_changed)
-        self.region_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Full Screen", "Tablet Bounds (16:10)", "Mobile Bounds (9:16)", "Custom Box Selection..."], command=self._on_region_changed)
+        self.region_menu = ctk.CTkOptionMenu(self.sidebar_frame, values=["Full Screen", "Tablet Bounds (16:10)", "Mobile Bounds (9:16)", "Custom Box Selection..."], command=self._on_region_changed,
+                                              fg_color=("#BA68C8", "#7B1FA2"), button_color=("#AB47BC", "#6A1B9A"), button_hover_color=("#9C27B0", "#4A148C"))
         self.region_menu.grid(row=4, column=0, padx=20, pady=(5, 15))
         
-        self.lock_switch = ctk.CTkSwitch(self.sidebar_frame, text="Region Lock", command=self._on_lock_changed)
+        self.lock_switch = ctk.CTkSwitch(self.sidebar_frame, text="Region Lock", command=self._on_lock_changed, progress_color=("#AB47BC", "#7B1FA2"))
         self.lock_switch.grid(row=5, column=0, padx=20, pady=(10, 10), sticky="nw")
         
-        self.mirror_switch = ctk.CTkSwitch(self.sidebar_frame, text="Screen Mirroring", command=self._on_mirror_changed)
-        self.mirror_switch.grid(row=8, column=0, padx=20, pady=(5, 20))
+        self.mirror_switch = ctk.CTkSwitch(self.sidebar_frame, text="Screen Mirroring", command=self._on_mirror_changed, progress_color=("#AB47BC", "#7B1FA2"))
+        self.mirror_switch.deselect()
+        self.mirror_switch.grid(row=6, column=0, padx=20, pady=(5, 15), sticky="nw")
+
+        self.theme_btn = ctk.CTkButton(self.sidebar_frame, text="☀ ☾", width=50, height=30, corner_radius=15, 
+                                       fg_color="transparent", border_width=1, border_color=("#AAA", "#555"),
+                                       text_color=("black", "white"), command=self._toggle_theme)
+        self.theme_btn.grid(row=7, column=0, padx=20, pady=(5, 20), sticky="nw")
 
         # --- Main Console ---
-        self.main_frame = ctk.CTkFrame(self, fg_color="#121214", corner_radius=0)
+        self.main_frame = ctk.CTkFrame(self, fg_color=("#EDEDED", "#090912"), corner_radius=0)
         self.main_frame.grid(row=0, column=1, sticky="nsew")
-        self.main_frame.grid_rowconfigure(0, weight=1)
-        self.main_frame.grid_rowconfigure(2, weight=1)
+        self.main_frame.grid_rowconfigure(1, weight=1)
+        self.main_frame.grid_rowconfigure(3, weight=1)
         self.main_frame.grid_columnconfigure(0, weight=1)
         
+        # --- Top Header (Presets & Theme) ---
+        self.header_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.header_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 0))
+        self.header_frame.grid_columnconfigure(11, weight=1)
+
+        self.preset_label = ctk.CTkLabel(self.header_frame, text="Active Preset:", font=ctk.CTkFont(size=12, weight="bold"))
+        self.preset_label.grid(row=0, column=0, padx=(0, 10))
+
+        self.active_preset = 1
+        self.preset_buttons = []
+        for i in range(1, 11):
+            text_val = str(i) if i <= 3 else "🔒"
+            fg_col = ("#E1BEE7", "#6A1B9A") if i <= 3 else ("#E0E0E0", "#1A1B26")
+            txt_col = ("black", "white") if i <= 3 else ("#AAA", "#555")
+            btn = ctk.CTkButton(self.header_frame, text=text_val, width=32, height=32, corner_radius=16, 
+                                font=ctk.CTkFont(weight="bold", size=13), fg_color=fg_col,
+                                text_color=txt_col, hover_color=("#CE93D8", "#8E24AA"))
+            btn.grid(row=0, column=i, padx=2)
+            btn.bind("<Button-1>", lambda e, slot=i: self._load_preset(slot))
+            self.preset_buttons.append(btn)
+
+        self.save_btn = ctk.CTkButton(self.header_frame, text="Save", width=50, height=32, corner_radius=16,
+                                      fg_color=("#BA68C8", "#9C27B0"), text_color="white", font=ctk.CTkFont(weight="bold"),
+                                      hover_color=("#CE93D8", "#7B1FA2"), command=self._save_active_preset)
+        self.save_btn.grid(row=0, column=12, padx=(10, 0))
+        
+        # Hide header frame initially until connection
+        self.header_frame.grid_remove()
+        
         # Center Card Container
-        self.card_frame = ctk.CTkFrame(self.main_frame, fg_color="#1A1A1E", corner_radius=15, width=400, height=250, border_width=1, border_color="#2A2A2E")
-        self.card_frame.grid(row=1, column=0, padx=20, pady=20)
+        self.card_frame = ctk.CTkFrame(self.main_frame, fg_color=("#FAFAFA", "#12101C"), corner_radius=15, width=440, height=270, border_width=1, border_color=("#A0A0C0", "#3D4070"))
+        self.card_frame.grid(row=2, column=0, padx=20, pady=20)
         self.card_frame.grid_propagate(False)
         self.card_frame.grid_rowconfigure(0, weight=1)
         self.card_frame.grid_rowconfigure(3, weight=1)
         self.card_frame.grid_columnconfigure(0, weight=1)
         
         self.instruction_label = ctk.CTkLabel(self.card_frame, text="INPUT PAIRING KEY ON TABLET PIPELINE", 
-                                              font=ctk.CTkFont(size=11, weight="bold"), text_color="#8A2BE2")
+                                              font=ctk.CTkFont(size=11, weight="bold"), text_color=("#6A0DAD", "#8A2BE2"))
         self.instruction_label.grid(row=1, column=0, pady=(40, 10))
         
         self.pin_label = ctk.CTkLabel(self.card_frame, text=self.pin, 
-                                      font=ctk.CTkFont(family="Consolas", size=56, weight="bold"), text_color="#FFFFFF")
-        self.pin_label.grid(row=2, column=0, pady=(0, 40))
+                                      font=ctk.CTkFont(family="Consolas", size=56, weight="bold"), text_color=("black", "white"))
+        self.pin_label.grid(row=2, column=0, pady=(0, 20))
+        
+        self.pipeline_status_label = ctk.CTkLabel(self.card_frame, text="PIPELINE: Waiting for connection...",
+                                                  font=ctk.CTkFont(size=11, weight="bold"), text_color=("#555555", "#888888"))
+        self.pipeline_status_label.grid(row=3, column=0, pady=(0, 20))
         
         # Debug Footer
         self.footnote_label = ctk.CTkLabel(self.main_frame, text=f"Host IP: {self.ip}  •  Active Port: {self.port}  •  UDP Discovery Active", 
@@ -793,6 +880,7 @@ class DrawTabApp(ctk.CTk):
             self._launch_custom_region_selector(target_ratio=None)
         
     def _launch_custom_region_selector(self, target_ratio: float = None):
+        self.iconify()
         import tkinter as tk
         selector = tk.Toplevel(self)
         selector.attributes('-fullscreen', True)
@@ -1008,6 +1096,7 @@ class DrawTabApp(ctk.CTk):
                 self.server.selected_region = {'left': box_coords[0], 'top': box_coords[1], 'width': width, 'height': height}
                 self.server.broadcast_region_state()
             selector.destroy()
+            self.deiconify()
             
         def on_flip(event):
             nonlocal current_ratio
@@ -1023,6 +1112,7 @@ class DrawTabApp(ctk.CTk):
             
         def on_escape(event):
             selector.destroy()
+            self.deiconify()
             
         canvas.bind('<ButtonPress-1>', on_press)
         canvas.bind('<B1-Motion>', on_drag)
@@ -1047,6 +1137,76 @@ class DrawTabApp(ctk.CTk):
                 try: asyncio.run_coroutine_threadsafe(ws.send(payload), self.server._loop)
                 except Exception: pass
 
+    def _toggle_theme(self):
+        current = ctk.get_appearance_mode()
+        new_mode = "Light" if current == "Dark" else "Dark"
+        ctk.set_appearance_mode(new_mode)
+        self.config_data['theme'] = new_mode
+        self._save_config()
+
+    def _load_preset(self, slot: int):
+        if not self.is_pro and slot > 3: return
+        
+        self.active_preset = slot
+        self._update_preset_colors()
+        
+        preset = self.preset_slots.get(str(slot))
+        if not preset or not self.server: 
+            return # Default state, nothing to load
+        
+        self.server.active_monitor_index = preset.get("monitor_index", 0)
+        self.server.region_locked = preset.get("region_locked", False)
+        if preset.get("region_mode_enabled"):
+            self.server.region_mode_enabled = True
+            self.server.selected_region = preset.get("selected_region")
+        else:
+            self.server.region_mode_enabled = False
+            self.server.selected_region = None
+            
+        self.server.broadcast_region_state()
+        
+        # update UI
+        self.display_menu.set(f"Monitor {self.server.active_monitor_index + 1}")
+        if self.server.region_locked:
+            self.lock_switch.select()
+        else:
+            self.lock_switch.deselect()
+
+    def _save_active_preset(self):
+        slot = self.active_preset
+        if not self.is_pro and slot > 3: return
+        if not self.server: return
+            
+        self.preset_slots[str(slot)] = {
+            "monitor_index": self.server.active_monitor_index,
+            "region_locked": self.server.region_locked,
+            "region_mode_enabled": self.server.region_mode_enabled,
+            "selected_region": self.server.selected_region
+        }
+        self.config_data['presets'] = self.preset_slots
+        self._save_config()
+        
+    def _update_preset_colors(self):
+        for i, btn in enumerate(self.preset_buttons):
+            slot = i + 1
+            if not self.is_pro and slot > 3:
+                btn.configure(fg_color=("#E0E0E0", "#1A1B26"), text_color=("#AAA", "#555"))
+            else:
+                if slot == self.active_preset:
+                    btn.configure(fg_color=("#BA68C8", "#9C27B0"), text_color="white") # Active slot highlight
+                else:
+                    btn.configure(fg_color=("#E1BEE7", "#6A1B9A"), text_color=("black", "white"))
+
+    def _update_preset_locks(self, is_pro):
+        self.is_pro = is_pro
+        for i, btn in enumerate(self.preset_buttons):
+            slot = i + 1
+            if not is_pro and slot > 3:
+                btn.configure(state="disabled", text="🔒", fg_color=("#E0E0E0", "#1A1B26"), text_color=("#AAA", "#555"))
+            else:
+                btn.configure(state="normal", text=str(slot), fg_color=("#E1BEE7", "#6A1B9A"), text_color=("black", "white"))
+        self._update_preset_colors()
+
     def _start_server(self):
         def _run_asyncio():
             self.server = DrawTabServer(host="0.0.0.0", port=self.port, width=1920, height=1080, enable_mirror=False)
@@ -1057,7 +1217,20 @@ class DrawTabApp(ctk.CTk):
                 else:
                     self.lock_switch.deselect()
             
+            def update_pipeline_status(is_pro):
+                if is_pro is None:
+                    text = "PIPELINE: Waiting for connection..."
+                elif is_pro:
+                    text = "CONNECTED DEVICE: iPad Pro (PRO MEMBER - 60FPS Unlocked)"
+                else:
+                    text = "CONNECTED DEVICE: Tablet (FREE TIER - 30FPS Limit)"
+                self.pipeline_status_label.configure(text=text)
+                if is_pro is not None:
+                    self.header_frame.grid()
+                    self._update_preset_locks(is_pro)
+
             self.server.on_lock_changed_callback = lambda locked: self.after(0, lambda: update_lock_switch(locked))
+            self.server.on_pipeline_status_changed = lambda is_pro: self.after(0, lambda: update_pipeline_status(is_pro))
             
             try:
                 asyncio.run(self.server.start())

@@ -64,8 +64,237 @@ class _DrawTabAppState extends State<DrawTabApp> {
               ),
               scaffoldBackgroundColor: const Color(0xFFF0F0F5),
             ),
-      home: const MainMenuScreen(),
+      home: const AuthHubScreen(),
       debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+enum UserTier { free, pro }
+
+class MockAuthService {
+  Future<UserTier?> signInWithGoogle(BuildContext context) async {
+    return await showModalBottomSheet<UserTier>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Choose an Account',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 24),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.blue, child: Text('F', style: TextStyle(color: Colors.white))),
+              title: const Text('Free User'),
+              subtitle: const Text('free.user@gmail.com'),
+              onTap: () => Navigator.pop(context, UserTier.free),
+            ),
+            ListTile(
+              leading: const CircleAvatar(backgroundColor: Colors.purple, child: Text('P', style: TextStyle(color: Colors.white))),
+              title: const Text('Pro User'),
+              subtitle: const Text('pro.user@gmail.com'),
+              onTap: () => Navigator.pop(context, UserTier.pro),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<UserTier?> signInWithEmail(String email, String password) async {
+    await Future.delayed(const Duration(seconds: 1));
+    if (email == 'free@drawtab.com' && password == 'password123') return UserTier.free;
+    if (email == 'pro@drawtab.com' && password == 'password123') return UserTier.pro;
+    return null;
+  }
+}
+
+class MockInAppPurchaseService {
+  Future<bool> buyPro() async {
+    // Simulate native IAP checkout sheet delay
+    await Future.delayed(const Duration(milliseconds: 1500));
+    return true; // Simulate successful purchase
+  }
+}
+
+class MockAdMobService {
+  Future<void> showRewardedVideo(VoidCallback onEarnedReward) async {
+    // Simulate loading and watching a rewarded video ad
+    await Future.delayed(const Duration(seconds: 3));
+    onEarnedReward();
+  }
+}
+
+class AuthHubScreen extends StatefulWidget {
+  const AuthHubScreen({super.key});
+
+  @override
+  State<AuthHubScreen> createState() => _AuthHubScreenState();
+}
+
+class _AuthHubScreenState extends State<AuthHubScreen> {
+  final _authService = MockAuthService();
+  bool _isLoading = false;
+  bool _showEmailForm = false;
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  Future<void> _handleAuth(Future<UserTier?> Function() authMethod) async {
+    setState(() => _isLoading = true);
+    final tier = await authMethod();
+    if (tier != null && mounted) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('isAuthenticated', true);
+      await prefs.setBool('isSubscribed', tier == UserTier.pro);
+      
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const MainMenuScreen()),
+      );
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Invalid credentials. Use free@drawtab.com or pro@drawtab.com with password123')),
+        );
+      }
+      setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF121214), // Deep slate background
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.draw, size: 80, color: Color(0xFF7C4DFF)),
+              const SizedBox(height: 16),
+              const Text(
+                'DrawTab Authentication',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 1.2,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 48),
+              if (_isLoading)
+                const CircularProgressIndicator(color: Color(0xFF7C4DFF))
+              else ...[
+                _buildAuthButton(
+                  'Continue with Google',
+                  Icons.login,
+                  () => _handleAuth(() => _authService.signInWithGoogle(context)),
+                ),
+                const SizedBox(height: 32),
+                const Text(
+                  'OR',
+                  style: TextStyle(color: Colors.white54, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 32),
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  curve: Curves.easeInOut,
+                  height: _showEmailForm ? 220 : 56,
+                  child: _showEmailForm
+                      ? Column(
+                          children: [
+                            TextField(
+                              controller: _emailController,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: InputDecoration(
+                                hintText: 'Email',
+                                hintStyle: const TextStyle(color: Colors.white54),
+                                filled: true,
+                                fillColor: const Color(0xFF1A1A1E),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide.none,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            TextField(
+                              controller: _passwordController,
+                              obscureText: true,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: InputDecoration(
+                                hintText: 'Password',
+                                hintStyle: const TextStyle(color: Colors.white54),
+                                filled: true,
+                                fillColor: const Color(0xFF1A1A1E),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide.none,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            _buildAuthButton(
+                              'Sign In',
+                              Icons.email,
+                              () => _handleAuth(() => _authService.signInWithEmail(
+                                _emailController.text,
+                                _passwordController.text,
+                              )),
+                            ),
+                          ],
+                        )
+                      : _buildAuthButton(
+                          'Continue with Email',
+                          Icons.mail_outline,
+                          () => setState(() => _showEmailForm = true),
+                          isOutlined: true,
+                        ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAuthButton(String text, IconData icon, VoidCallback onPressed, {bool isOutlined = false}) {
+    return SizedBox(
+      width: double.infinity,
+      height: 56,
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: isOutlined ? Colors.transparent : const Color(0xFF7C4DFF),
+          foregroundColor: Colors.white,
+          elevation: isOutlined ? 0 : 4,
+          side: isOutlined ? BorderSide(color: Colors.white.withOpacity(0.2)) : null,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+        onPressed: onPressed,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 24),
+            const SizedBox(width: 12),
+            Text(text, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -84,14 +313,116 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
   String _status = '';
   bool _isFocused = false;
 
+  bool _isAuthenticated = false;
+  UserTier _userTier = UserTier.free;
+  DateTime? _sessionExpiry;
+  Timer? _sessionTimer;
+
+  int get _sessionSecondsRemaining {
+    if (_sessionExpiry == null) return 0;
+    final diff = _sessionExpiry!.difference(DateTime.now()).inSeconds;
+    return diff > 0 ? diff : 0;
+  }
+
+  // Hooks for state management (e.g. Riverpod/Bloc)
+  void _refreshAuthToken() {
+    // Implement token refresh logic here without disrupting the view
+  }
+
+  final _iapService = MockInAppPurchaseService();
+  final _adMobService = MockAdMobService();
+
   @override
   void initState() {
     super.initState();
+    _loadMonetizationState();
     _focusNode.addListener(() {
       setState(() {
         _isFocused = _focusNode.hasFocus;
       });
     });
+  }
+
+  Future<void> _loadMonetizationState() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isAuthenticated = prefs.getBool('isAuthenticated') ?? false;
+      final isSubbed = prefs.getBool('isSubscribed') ?? false;
+      _userTier = isSubbed ? UserTier.pro : UserTier.free;
+      
+      final expiryStr = prefs.getString('sessionExpiry');
+      if (expiryStr != null) {
+        _sessionExpiry = DateTime.parse(expiryStr);
+      } else {
+        _sessionExpiry = DateTime.now();
+      }
+    });
+    _startSessionTimer();
+  }
+
+  void _startSessionTimer() {
+    _sessionTimer?.cancel();
+    _sessionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_userTier == UserTier.pro) {
+        timer.cancel();
+        return;
+      }
+      // Rebuild UI to reflect the calculated _sessionSecondsRemaining
+      setState(() {});
+    });
+  }
+
+  Future<void> _handleBuyPro() async {
+    final bool? confirm = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(builder: (context) => const MockPaymentGatewayScreen()),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _status = 'Initializing Purchase...');
+    final success = await _iapService.buyPro();
+    if (success && mounted) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('isSubscribed', true);
+      setState(() {
+        _userTier = UserTier.pro;
+        _status = '';
+      });
+    } else {
+      if (mounted) setState(() => _status = 'Purchase Failed');
+    }
+  }
+
+  Future<void> _handleWatchAd() async {
+    setState(() => _status = 'Loading Ad...');
+    await _adMobService.showRewardedVideo(() async {
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        if (_sessionExpiry == null || _sessionExpiry!.isBefore(DateTime.now())) {
+           _sessionExpiry = DateTime.now().add(const Duration(minutes: 30));
+        } else {
+           _sessionExpiry = _sessionExpiry!.add(const Duration(minutes: 30));
+        }
+        
+        final maxExpiry = DateTime.now().add(const Duration(hours: 2));
+        if (_sessionExpiry!.isAfter(maxExpiry)) {
+           _sessionExpiry = maxExpiry;
+        }
+        
+        _status = '';
+      });
+      await prefs.setString('sessionExpiry', _sessionExpiry!.toIso8601String());
+      _startSessionTimer();
+    });
+  }
+  
+  Future<void> _resetTimer() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _sessionExpiry = DateTime.now();
+    });
+    await prefs.setString('sessionExpiry', _sessionExpiry!.toIso8601String());
   }
 
   @override
@@ -182,7 +513,7 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => DrawingScreen(serverUri: uri, channel: channel),
+          builder: (_) => DrawingScreen(serverUri: uri, channel: channel, isPro: _userTier == UserTier.pro),
         ),
       ).then((_) {
         setState(() {
@@ -201,169 +532,240 @@ class _MainMenuScreenState extends State<MainMenuScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isDark = DrawTabApp.of(context)?.isDark ?? true;
-    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    final isPro = _userTier == UserTier.pro;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF121214), // Deep slate/charcoal workspace
+      backgroundColor: const Color(0xFF1B1B22), // Matching the dark outer background in Figma
       body: SafeArea(
-        child: Stack(
-          children: [
-            // Title Context Header
-            Positioned(
-              top: 16,
-              left: 24,
-              right: 16,
-              child: Row(
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              // Top Header
+              Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text(
-                    'DrawTab . Pipeline Hub',
+                    'DrawTab',
                     style: TextStyle(
-                      color: Colors.white70,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w300,
-                      letterSpacing: 1.5,
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
-                  IconButton(
-                    icon: Icon(isDark ? Icons.light_mode : Icons.dark_mode, size: 20),
-                    color: Colors.white70,
-                    onPressed: () => DrawTabApp.of(context)?.toggleTheme(),
+                  Row(
+                    children: [
+                      if (!isPro) ...[
+                        _buildCircleIcon(Icons.undo, _resetTimer), // Reusing reset timer logic for the undo button
+                        const SizedBox(width: 12),
+                      ],
+                      _buildCircleIcon(isDark ? Icons.light_mode : Icons.dark_mode, () => DrawTabApp.of(context)?.toggleTheme()),
+                      const SizedBox(width: 12),
+                      _buildCircleIcon(Icons.settings, () {}),
+                    ],
                   ),
                 ],
               ),
-            ),
-            
-            // Connection Input Deck
-            Center(
-              child: Padding(
-                padding: EdgeInsets.symmetric(horizontal: isLandscape ? 120.0 : 32.0),
+              const SizedBox(height: 16),
+              // Main Card
+              Expanded(
                 child: Container(
-                  padding: const EdgeInsets.all(40),
+                  width: double.infinity,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF1A1A1E).withOpacity(0.85),
+                    color: const Color(0xFF23253A), // Dark navy card background
                     borderRadius: BorderRadius.circular(24),
-                    border: Border.all(
-                      color: Colors.white.withOpacity(0.1),
-                      width: 1,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.3),
-                        blurRadius: 30,
-                        offset: const Offset(0, 10),
-                      )
-                    ],
+                    border: Border.all(color: const Color(0xFF7C4DFF).withValues(alpha: 0.3)),
                   ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(24),
-                    child: BackdropFilter(
-                      filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text(
-                            'Enter 6-Digit Desktop Code',
+                  child: Stack(
+                    children: [
+                      // Badge
+                      Positioned(
+                        top: 24,
+                        left: 24,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: isPro ? Colors.cyan : Colors.yellow),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            isPro ? 'Pro Tier' : 'FREE TIER',
                             style: TextStyle(
-                              color: Colors.white54,
+                              color: isPro ? Colors.cyan : Colors.yellow,
+                              fontWeight: FontWeight.bold,
                               fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 1.2,
                             ),
                           ),
-                          const SizedBox(height: 24),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              SizedBox(
-                                width: 220,
-                                child: TextField(
-                                  controller: _pinController,
-                                  focusNode: _focusNode,
-                                  maxLength: 6,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontFamily: 'Courier',
-                                    fontSize: 32,
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 12,
-                                    color: Colors.white,
-                                  ),
-                                  keyboardType: TextInputType.number,
-                                  inputFormatters: [
-                                    FilteringTextInputFormatter.digitsOnly,
-                                  ],
-                                  decoration: InputDecoration(
-                                    counterText: "", // Hide the character counter
-                                    filled: true,
-                                    fillColor: const Color(0xFF121214),
-                                    contentPadding: const EdgeInsets.symmetric(vertical: 20),
-                                    enabledBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: BorderSide(
-                                        color: Colors.white.withOpacity(0.2),
-                                        width: 1,
-                                      ),
-                                    ),
-                                    focusedBorder: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(12),
-                                      borderSide: const BorderSide(
-                                        color: Color(0xFF00E5FF), // Neon Cyan
-                                        width: 1,
-                                      ),
-                                    ),
-                                  ),
-                                  onSubmitted: (_) => _resolvePinAndConnect(),
-                                ),
-                              ),
-                              const SizedBox(width: 16),
-                              Container(
-                                height: 72,
-                                width: 72,
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF7C4DFF), // Neon Purple Execution Button
-                                  borderRadius: BorderRadius.circular(16),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: const Color(0xFF7C4DFF).withOpacity(0.4),
-                                      blurRadius: 12,
-                                      offset: const Offset(0, 4),
-                                    )
-                                  ],
-                                ),
-                                child: _connecting
-                                    ? const Padding(
-                                        padding: EdgeInsets.all(24.0),
-                                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-                                      )
-                                    : IconButton(
-                                        icon: const Icon(Icons.arrow_forward_ios, color: Colors.white),
-                                        onPressed: _resolvePinAndConnect,
-                                      ),
-                              ),
-                            ],
-                          ),
-                          if (_status.isNotEmpty) ...[
-                            const SizedBox(height: 24),
-                            Text(
-                              _status,
-                              style: const TextStyle(
-                                color: Colors.redAccent,
-                                fontSize: 12,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ]
-                        ],
+                        ),
                       ),
-                    ),
+                      
+                      // Center Content
+                      Center(
+                        child: SingleChildScrollView(
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 40),
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                final isWide = constraints.maxWidth > 500;
+                                return Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (!isPro) ...[
+                                      Text(
+                                        _sessionSecondsRemaining > 0 
+                                            ? '${(_sessionSecondsRemaining ~/ 60).toString().padLeft(2, '0')}:${(_sessionSecondsRemaining % 60).toString().padLeft(2, '0')}'
+                                            : '00:00',
+                                        style: const TextStyle(
+                                          fontSize: 48,
+                                          fontWeight: FontWeight.bold,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 24),
+                                      Wrap(
+                                        spacing: 16,
+                                        runSpacing: 16,
+                                        alignment: WrapAlignment.center,
+                                        children: [
+                                          ElevatedButton.icon(
+                                            onPressed: _handleWatchAd,
+                                            icon: const Icon(Icons.play_circle_outline),
+                                            label: const Text('Watch an Ad\nto add 30 Mins', textAlign: TextAlign.center),
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: Colors.green.shade500,
+                                              foregroundColor: Colors.white,
+                                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                            ),
+                                          ),
+                                          OutlinedButton.icon(
+                                            onPressed: _handleBuyPro,
+                                            icon: const Icon(Icons.lock_outline),
+                                            label: const Text('Upgrade to\nPro', textAlign: TextAlign.center),
+                                            style: OutlinedButton.styleFrom(
+                                              foregroundColor: Colors.yellow.shade300,
+                                              side: BorderSide(color: Colors.yellow.shade300),
+                                              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 32),
+                                    ],
+                                    
+                                    // Decorative Line
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Transform.rotate(angle: 3.14/4, child: Container(width: 8, height: 8, color: const Color(0xFF7C4DFF))),
+                                        Container(width: isWide ? 400 : 250, height: 2, color: const Color(0xFF7C4DFF)),
+                                        Transform.rotate(angle: 3.14/4, child: Container(width: 8, height: 8, color: const Color(0xFF7C4DFF))),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 32),
+                                    
+                                    // Input & Connect Button
+                                    Wrap(
+                                      spacing: 16,
+                                      runSpacing: 16,
+                                      alignment: WrapAlignment.center,
+                                      crossAxisAlignment: WrapCrossAlignment.center,
+                                      children: [
+                                        SizedBox(
+                                          width: 250,
+                                          child: TextField(
+                                            controller: _pinController,
+                                            focusNode: _focusNode,
+                                            enabled: isPro || _sessionSecondsRemaining > 0,
+                                            maxLength: 6,
+                                            style: const TextStyle(color: Colors.white, fontSize: 18, letterSpacing: 2),
+                                            decoration: InputDecoration(
+                                              counterText: "",
+                                              hintText: 'Enter Code',
+                                              hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.5), letterSpacing: 0),
+                                              filled: true,
+                                              fillColor: const Color(0xFF1B1B22),
+                                              contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                                              border: OutlineInputBorder(
+                                                borderRadius: BorderRadius.circular(12),
+                                                borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.2)),
+                                              ),
+                                            ),
+                                            onSubmitted: (_) {
+                                              if (isPro || _sessionSecondsRemaining > 0) _resolvePinAndConnect();
+                                            },
+                                          ),
+                                        ),
+                                        InkWell(
+                                          onTap: () {
+                                            if (isPro || _sessionSecondsRemaining > 0) _resolvePinAndConnect();
+                                          },
+                                          borderRadius: BorderRadius.circular(12),
+                                          child: Container(
+                                            height: 54,
+                                            padding: const EdgeInsets.symmetric(horizontal: 32),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF7C4DFF),
+                                              borderRadius: BorderRadius.circular(12),
+                                            ),
+                                            child: Center(
+                                              child: _connecting
+                                                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                                                  : const Text(
+                                                      'Connect',
+                                                      style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                                                    ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    
+                                    if (_status.isNotEmpty) ...[
+                                      const SizedBox(height: 24),
+                                      Text(
+                                        _status,
+                                        style: TextStyle(
+                                          color: _status.contains('Failed') || _status.contains('Invalid') 
+                                              ? Colors.redAccent 
+                                              : Colors.white70,
+                                        ),
+                                        textAlign: TextAlign.center,
+                                      ),
+                                    ]
+                                  ],
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildCircleIcon(IconData icon, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        width: 36,
+        height: 36,
+        decoration: BoxDecoration(
+          color: const Color(0xFF4A4A6A).withValues(alpha: 0.5),
+          shape: BoxShape.circle,
+        ),
+        child: Icon(icon, color: Colors.white70, size: 20),
       ),
     );
   }
@@ -421,8 +823,9 @@ class DrawEvent {
 class DrawingScreen extends StatefulWidget {
   final Uri serverUri;
   final WebSocketChannel channel;
+  final bool isPro;
 
-  const DrawingScreen({super.key, required this.serverUri, required this.channel});
+  const DrawingScreen({super.key, required this.serverUri, required this.channel, required this.isPro});
 
   @override
   State<DrawingScreen> createState() => _DrawingScreenState();
@@ -470,10 +873,28 @@ class _DrawingScreenState extends State<DrawingScreen> {
   
   final GlobalKey _pressureIconKey = GlobalKey();
 
+  DateTime? _sessionExpiry;
+  bool _isPaused = false;
+  Timer? _heartbeatTimer;
+
+  int get _sessionSecondsRemaining {
+    if (_sessionExpiry == null) return 0;
+    final diff = _sessionExpiry!.difference(DateTime.now()).inSeconds;
+    return diff > 0 ? diff : 0;
+  }
+
   @override
   void initState() {
     super.initState();
     _channel = widget.channel;
+    _sendCommand({
+      'cmd': 'client_handshake',
+      'tier': widget.isPro ? 'pro' : 'free',
+    });
+    _sendCommand({
+      'cmd': 'initialize_stream',
+      'is_pro': widget.isPro,
+    });
     _setupWebSocket();
     _flushTimer = Timer.periodic(const Duration(milliseconds: 1), (_) => _flush());
     _loadPrefs();
@@ -484,6 +905,54 @@ class _DrawingScreenState extends State<DrawingScreen> {
     setState(() {
       _drawShortcut = prefs.getString('draw_shortcut') ?? 'b';
       _eraserShortcut = prefs.getString('eraser_shortcut') ?? 'e';
+      final expiryStr = prefs.getString('sessionExpiry');
+      if (expiryStr != null) {
+        _sessionExpiry = DateTime.parse(expiryStr);
+      } else {
+        _sessionExpiry = DateTime.now();
+      }
+      _isPaused = !widget.isPro && _sessionSecondsRemaining <= 0;
+    });
+    
+    if (!widget.isPro) {
+      _heartbeatTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        setState(() {
+          _isPaused = _sessionSecondsRemaining <= 0;
+        });
+        
+        if (timer.tick % 5 == 0) {
+          _sendCommand({
+            'cmd': 'session_heartbeat',
+            'time_remaining': _sessionSecondsRemaining
+          });
+        }
+      });
+    }
+  }
+
+  final _adMobService = MockAdMobService();
+
+  Future<void> _handleWatchAd() async {
+    await _adMobService.showRewardedVideo(() async {
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        if (_sessionExpiry == null || _sessionExpiry!.isBefore(DateTime.now())) {
+           _sessionExpiry = DateTime.now().add(const Duration(minutes: 30));
+        } else {
+           _sessionExpiry = _sessionExpiry!.add(const Duration(minutes: 30));
+        }
+        
+        final maxExpiry = DateTime.now().add(const Duration(hours: 2));
+        if (_sessionExpiry!.isAfter(maxExpiry)) {
+           _sessionExpiry = maxExpiry;
+        }
+        _isPaused = false;
+      });
+      await prefs.setString('sessionExpiry', _sessionExpiry!.toIso8601String());
+      _sendCommand({
+        'cmd': 'session_heartbeat',
+        'time_remaining': _sessionSecondsRemaining
+      });
     });
   }
 
@@ -714,6 +1183,7 @@ class _DrawingScreenState extends State<DrawingScreen> {
 
   @override
   void dispose() {
+    _heartbeatTimer?.cancel();
     _flushTimer?.cancel();
     _channelSubscription?.cancel();
     _channel.sink.close();
@@ -805,7 +1275,36 @@ class _DrawingScreenState extends State<DrawingScreen> {
               ),
             ),
           ),
-        ),
+          ),
+          
+          if (_isPaused)
+            Positioned.fill(
+              child: BackdropFilter(
+                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                child: Container(
+                  color: Colors.black.withOpacity(0.3),
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A1A1E).withOpacity(0.85),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.white.withOpacity(0.2)),
+                      ),
+                      child: const Text(
+                        'Session Paused.\nExtend canvas runtime via the navigation bar to resume work.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
           
           // Floating Navbar
           Positioned(
@@ -858,9 +1357,41 @@ class _DrawingScreenState extends State<DrawingScreen> {
                         
                         if (_navbarExpanded)
                           Expanded(
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
+                            child: LayoutBuilder(
+                              builder: (context, constraints) {
+                                return SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: ConstrainedBox(
+                                    constraints: BoxConstraints(minWidth: constraints.maxWidth),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                                      children: [
+                                if (!widget.isPro)
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: _sessionSecondsRemaining < 300 
+                                          ? Colors.redAccent.withOpacity(0.2) 
+                                          : Colors.white.withOpacity(0.1),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(
+                                        color: _sessionSecondsRemaining < 300 
+                                            ? Colors.redAccent 
+                                            : Colors.transparent
+                                      ),
+                                    ),
+                                    child: Text(
+                                      '${(_sessionSecondsRemaining ~/ 60).toString().padLeft(2, '0')}:${(_sessionSecondsRemaining % 60).toString().padLeft(2, '0')}',
+                                      style: TextStyle(
+                                        fontFamily: 'Courier',
+                                        fontWeight: FontWeight.bold,
+                                        color: _sessionSecondsRemaining < 300 
+                                            ? Colors.redAccent 
+                                            : theme.textTheme.bodyLarge?.color ?? Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                const SizedBox(width: 8),
                                 _buildNavIcon(
                                   _regionLocked ? Icons.lock : Icons.lock_open,
                                   'Region Lock',
@@ -891,12 +1422,19 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                   },
                                   _eraserMode ? Colors.redAccent : null
                                 ),
+                                if (!widget.isPro && _sessionSecondsRemaining <= 300)
+                                  _buildNavIcon(
+                                    Icons.play_circle_outline,
+                                    'Watch Ad to Unpause',
+                                    _handleWatchAd,
+                                    Colors.greenAccent
+                                  ),
                                 if (!_connected)
                                   _buildNavIcon(
                                     Icons.refresh,
                                     'Reconnect',
                                     _reconnect,
-                                    Colors.orange
+                                    Colors.orangeAccent
                                   ),
                                 _buildNavIcon(
                                   Icons.power_settings_new,
@@ -911,6 +1449,10 @@ class _DrawingScreenState extends State<DrawingScreen> {
                                   theme.colorScheme.primary
                                 ),
                               ],
+                            ),
+                                  ),
+                                );
+                              }
                             ),
                           ),
                           
@@ -1018,4 +1560,119 @@ class _GridPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+
+class MockPaymentGatewayScreen extends StatefulWidget {
+  const MockPaymentGatewayScreen({super.key});
+
+  @override
+  State<MockPaymentGatewayScreen> createState() => _MockPaymentGatewayScreenState();
+}
+
+class _MockPaymentGatewayScreenState extends State<MockPaymentGatewayScreen> {
+  bool _isProcessing = false;
+
+  void _processPayment() async {
+    setState(() => _isProcessing = true);
+    await Future.delayed(const Duration(seconds: 2));
+    if (mounted) {
+      Navigator.pop(context, true);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Secure Checkout'),
+        backgroundColor: theme.scaffoldBackgroundColor,
+        elevation: 0,
+      ),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 400),
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.workspace_premium, size: 64, color: Color(0xFF00E5FF)),
+                const SizedBox(height: 24),
+                const Text(
+                  'DrawTab Pro Lifetime',
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '\.99 USD',
+                  style: TextStyle(fontSize: 32, fontWeight: FontWeight.w900),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 48),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: theme.dividerColor),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Credit Card', style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 12),
+                      const TextField(
+                        decoration: InputDecoration(
+                          hintText: 'Card Number',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.credit_card),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        children: const [
+                          Expanded(
+                            child: TextField(
+                              decoration: InputDecoration(
+                                hintText: 'MM/YY',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 12),
+                          Expanded(
+                            child: TextField(
+                              decoration: InputDecoration(
+                                hintText: 'CVC',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 32),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.all(20),
+                    backgroundColor: const Color(0xFF7C4DFF),
+                  ),
+                  onPressed: _isProcessing ? null : _processPayment,
+                  child: _isProcessing 
+                    ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                    : const Text('Pay \.99', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
